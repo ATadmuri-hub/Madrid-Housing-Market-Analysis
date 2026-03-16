@@ -1,0 +1,2 @@
+*.qmd linguist-language=R
+*.css linguist-vendored

@@ -1,0 +1,40 @@
+# R / RStudio
+.Rhistory
+.RData
+.RDataTmp*
+.Rproj.user/
+*.Rproj
+
+# Knitr/Quarto cache and output
+*_cache/
+*_files/
+.exec_cache/
+
+# Rendered output (regenerate from .qmd)
+*.html
+
+# Raw data (not redistributable)
+RAW data/
+RAW data /
+data:raw:*
+
+# Outputs (regeneratable)
+outputs/
+outputs_phase*/
+
+# Documents with potentially sensitive content
+*.docx
+*.pdf
+
+# macOS
+.DS_Store
+
+# Microsoft Office lock files
+~$*
+
+# Draft and working files (not for publication)
+*_draft_*
+Madrid_RE_Intelligence_Pro.*
+Madrid_RE_Presentation.*
+Madrid_RE_Results_Report.md
+*_Stat_2_DS.*

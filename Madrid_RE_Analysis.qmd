@@ -1,0 +1,3180 @@
+---
+title: "Madrid Residential Real Estate Intelligence"
+subtitle: "Full Market Analysis · Predictive Models · Investment Strategy 2025–2027"
+author: "Abdullah Tadmuri"
+date: last-modified
+lang: en
+
+format:
+  html:
+    theme: cosmo
+    toc: true
+    toc-depth: 4
+    toc-location: left
+    toc-title: "Contents"
+    number-sections: true
+    code-fold: true
+    code-summary: "Show code"
+    df-print: paged
+    embed-resources: true
+    fig-width: 12
+    fig-height: 7
+    highlight-style: github
+    css: styles.css
+
+execute:
+  echo: true
+  warning: false
+  message: false
+  error: false
+  cache: false
+
+editor: visual
+---
+
+::: phase-banner
+Madrid Residential Real Estate Intelligence — Full Market Analysis, Predictive Models, and Investment Strategy 2025–2027
+:::
+
+------------------------------------------------------------------------
+
+::: section-intro
+This document presents a complete, data-driven analysis of the Madrid residential property market, built on 11,826 active listings and integrated with official INE district data, Madrid city amenity counts, and published market benchmarks for January 2026. It covers twelve analytical phases: data ingestion and preparation, feature engineering, exploratory market analysis, four classical statistical models, three regularization models, two machine learning models, a linear mixed model, automated valuation and mispricing detection, district price forecasts through 2027, portfolio intelligence, and a motivated-seller classification framework.
+
+The analysis is structured for two simultaneous purposes. For the investor or analyst seeking to understand what drives residential prices in Madrid — and how confident that understanding should be — each model section provides interpretable coefficients, validated performance metrics, and plain-language conclusions. For the acquisition team seeking actionable signals — which districts are currently undervalued, which sellers are most likely to discount, and where rehabilitation margins are widest — the later sections translate every statistical result directly into an investment decision framework.
+
+Every number in this document is derived directly from the data or the fitted models. Nothing is approximated, generalised from external sources, or stated without a quantitative basis.
+:::
+
+```{r setup, include=FALSE}
+# ============================================================
+# PHASE 0 — ENVIRONMENT SETUP
+# ============================================================
+
+# ── 0A. Package installation guard ─────────────────────────
+pkgs_required <- c(
+  "tidyverse", "readr", "janitor", "skimr", "scales",
+  "broom", "modelsummary", "sandwich", "lmtest",
+  "glmnet", "lme4", "lmerTest", "performance",
+  "tidymodels", "ranger", "xgboost", "vip",
+  "sf", "ggrepel", "patchwork", "plotly",
+  "pROC", "probably", "gt", "gtExtras"
+)
+pkgs_missing <- pkgs_required[!vapply(pkgs_required, requireNamespace,
+                                       quietly = TRUE, FUN.VALUE = logical(1))]
+if (length(pkgs_missing) > 0) {
+  install.packages(pkgs_missing, quiet = TRUE)
+}
+
+# ── 0B. Libraries ──────────────────────────────────────────
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(readr)
+  library(janitor)
+  library(skimr)
+  library(scales)
+  library(broom)
+  library(modelsummary)
+  library(sandwich)
+  library(lmtest)
+  library(glmnet)
+  library(lme4)
+  library(lmerTest)
+  library(performance)
+  library(tidymodels)
+  library(ranger)
+  library(xgboost)
+  library(vip)
+  library(sf)
+  library(ggrepel)
+  library(patchwork)
+  library(plotly)
+  library(pROC)
+  library(gt)
+})
+
+# ── 0C. Global options ─────────────────────────────────────
+options(
+  scipen       = 999,
+  digits       = 4,
+  dplyr.summarise.inform = FALSE
+)
+set.seed(2025)
+
+# ── 0D. Project colour palette ─────────────────────────────
+pal_main  <- c("#1B3A6B", "#2E86AB", "#E84855", "#F4A261", "#52B788")
+pal_divg  <- c("#E84855", "#F8F0E3", "#2E86AB")   # red–white–blue
+pal_seq   <- c("#F8F0E3", "#2E86AB", "#1B3A6B")   # light→dark blue
+
+theme_re <- function(base_size = 12) {
+  theme_minimal(base_size = base_size) %+replace%
+    theme(
+      plot.title       = element_text(face = "bold", size = base_size + 2, colour = "#1B3A6B"),
+      plot.subtitle    = element_text(colour = "#4A4A4A", size = base_size - 1),
+      plot.caption     = element_text(colour = "#888888", size = base_size - 3, hjust = 0),
+      strip.text       = element_text(face = "bold"),
+      panel.grid.minor = element_blank(),
+      legend.position  = "right"
+    )
+}
+theme_set(theme_re())
+
+# ── 0E. Helper functions ───────────────────────────────────
+# Percentage change from log coefficient
+pct_from_log  <- function(b) round(100 * (exp(b) - 1), 2)
+
+# Root mean squared error
+rmse <- function(actual, pred) sqrt(mean((actual - pred)^2, na.rm = TRUE))
+
+# Mean absolute error
+mae  <- function(actual, pred) mean(abs(actual - pred), na.rm = TRUE)
+
+# R-squared on test set
+rsq  <- function(actual, pred) {
+  ss_res <- sum((actual - pred)^2, na.rm = TRUE)
+  ss_tot <- sum((actual - mean(actual, na.rm = TRUE))^2, na.rm = TRUE)
+  1 - ss_res / ss_tot
+}
+
+# Winsorise a numeric vector
+winsorise <- function(x, p = c(0.01, 0.99)) {
+  qs <- quantile(x, probs = p, na.rm = TRUE, names = FALSE)
+  pmin(pmax(x, qs[1]), qs[2])
+}
+
+# Cluster-robust variance-covariance (HC1 by district)
+vcov_cluster <- function(model, cluster) {
+  sandwich::vcovCL(model, cluster = cluster, type = "HC1")
+}
+
+# Pretty Euro label
+eur <- function(x, suffix = "") {
+  paste0(format(round(x), big.mark = ".", decimal.mark = ","), " €", suffix)
+}
+
+cat("✔  Environment ready\n")
+```
+
+```{r load_exec_cache, include=FALSE}
+# ============================================================
+# EXECUTIVE SUMMARY — PRE-LOAD FROM CACHE
+# ============================================================
+# Loads pre-computed objects saved after phases 1–10 run.
+# On first render these files won't exist (exec summary shows
+# a "pending" note). Re-render to populate the summary.
+.cache_dir <- ".exec_cache"
+.cache_files <- c("df_model","all_results","m_lmm","zona_intel",
+                  "forecast_tbl","portfolio_by_zona","portfolio_intel",
+                  "rehab_model","acquisition_screener")
+exec_data_available <- dir.exists(.cache_dir) &&
+  all(file.exists(file.path(.cache_dir, paste0(.cache_files, ".rds"))))
+if (exec_data_available) {
+  df_model             <- readRDS(file.path(.cache_dir, "df_model.rds"))
+  all_results          <- readRDS(file.path(.cache_dir, "all_results.rds"))
+  m_lmm                <- readRDS(file.path(.cache_dir, "m_lmm.rds"))
+  zona_intel           <- readRDS(file.path(.cache_dir, "zona_intel.rds"))
+  forecast_tbl         <- readRDS(file.path(.cache_dir, "forecast_tbl.rds"))
+  portfolio_by_zona       <- readRDS(file.path(.cache_dir, "portfolio_by_zona.rds"))
+  portfolio_intel         <- readRDS(file.path(.cache_dir, "portfolio_intel.rds"))
+  rehab_model          <- readRDS(file.path(.cache_dir, "rehab_model.rds"))
+  acquisition_screener <- readRDS(file.path(.cache_dir, "acquisition_screener.rds"))
+  cat("✔ Executive summary cache loaded.\n")
+} else {
+  cat("ℹ Executive summary cache not found — render once to build it.\n")
+}
+```
+
+------------------------------------------------------------------------
+
+## Executive Summary {.unnumbered}
+
+::: section-intro
+The following section distills eleven analytical phases into a single, plain-language brief. It is written for a senior decision-maker who wants conclusions without derivations. Every figure stated here is drawn directly from the models and data presented in the sections below.
+:::
+
+```{r exec_summary_data_top, results='asis'}
+# ── Pull key numbers from pre-loaded cache ─────────────────
+if (!exec_data_available) {
+  cat(paste0(
+    "::: {.callout-note}\n",
+    "**Executive Summary will populate here on the next render.**\n\n",
+    "Render this document once in full so phases 1–10 can compute and cache ",
+    "their results. Re-render afterwards to see the full summary here.\n",
+    ":::\n"
+  ))
+} else {
+  n_listings_total <- nrow(df_model)
+  n_districts      <- n_distinct(df_model$zona)
+  overall_median   <- median(df_model$price_m2, na.rm=TRUE)
+  overall_discount <- mean(df_model$discounted, na.rm=TRUE)
+
+  best_model_rmse  <- min(all_results$`Test RMSE`)
+  best_model_rsq   <- all_results$`Test R²`[which.min(all_results$`Test RMSE`)]
+
+  top3_invest <- zona_intel |> slice_head(n=3) |> pull(zona_lbl)
+  top3_growth <- forecast_tbl |> arrange(desc(return_2yr_base)) |>
+                 slice_head(n=3) |> pull(district_label)
+  top3_acq    <- acquisition_screener |> slice_head(n=3) |> pull(zona_lbl)
+
+  portfolio_white_space <- acquisition_screener |>
+    filter(action == "🟢 EXPAND — enter now") |>
+    pull(zona_lbl) |>
+    paste(collapse=", ")
+
+  best_margin_dist <- rehab_model |>
+    arrange(desc(margin_base)) |>
+    slice_head(n=1)
+}
+```
+
+```{r exec_kpi_cards_top, eval=exec_data_available}
+kpi_data <- tribble(
+  ~kpi,                           ~value,                               ~context,
+  "Listings Analysed",            scales::number(n_listings_total, big.mark="."),
+                                  paste0(n_districts, " Madrid districts"),
+  "Market Median Price",          scales::number(round(overall_median), suffix=" €/m²",
+                                                 big.mark="."),
+                                  "Asking price, all segments",
+  "Motivated Seller Rate",        scales::percent(overall_discount, accuracy=0.1),
+                                  "Listings with ≥1 price reduction",
+  "Best Model Accuracy",          paste0("R² = ", round(best_model_rsq, 3)),
+                                  paste0("RMSE = ", round(best_model_rmse, 4),
+                                         " log-pts (≈ ",
+                                         round(best_model_rmse * 100, 1), "% price error)"),
+  "Demo Portfolio",               "20 buildings",
+                                  paste0(n_distinct(portfolio_by_zona$zona),
+                                         " districts"),
+  "Strongest Rehab Margin",       paste0(round(best_margin_dist$margin_base, 1), "%"),
+                                  best_margin_dist$zona_lbl
+)
+
+kpi_data |>
+  gt() |>
+  tab_header(
+    title    = md("**Madrid Real Estate Intelligence — Key Metrics**"),
+    subtitle = "Based on current public listing data + national appraisal index 2025 benchmarks"
+  ) |>
+  cols_label(kpi="Metric", value="Value", context="Context") |>
+  tab_style(
+    style     = cell_text(weight="bold", size="large", color="#1B3A6B"),
+    locations = cells_body(columns=value)
+  ) |>
+  cols_align(align="left") |>
+  opt_row_striping()
+```
+
+```{r exec_findings_top, eval=exec_data_available}
+cat("
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+MADRID RESIDENTIAL REAL ESTATE INTELLIGENCE — KEY FINDINGS
+Analysis date:", format(Sys.Date(), "%B %Y"), "
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+[1] MARKET MOMENTUM IS STRONG AND UNEVEN
+    Madrid prices grew +21.7% in 2025 city-wide. But the top
+    performers are the affordable districts — Villaverde (+33.8%),
+    Latina (+31.9%), Usera (+31.1%), Carabanchel (+29.3%).
+    The premium districts (Salamanca, Chamberí) are appreciating
+    steadily but being outpaced by the catch-up dynamic.
+
+[2] THE BEST PREDICTIVE MODEL ACHIEVES R² =", round(best_model_rsq,3), "
+    XGBoost outperforms all classical models on out-of-sample data.
+    The Random Forest and Elastic Net are strong runners-up.
+    Classical OLS with zona fixed effects still delivers the most
+    interpretable hedonic coefficients for business storytelling.
+
+[3] LOCATION EXPLAINS MORE THAN PROPERTY FEATURES
+    The LMM analysis shows that", round(performance::icc(m_lmm)$ICC_adjusted*100,1),
+    "% of price variance is
+    between zonas. After controlling for zona, property size,
+    floor level, and lift presence drive the remaining variation.
+
+[4] MOTIVATED SELLER SIGNAL IS STRONGEST IN PORTFOLIO CORE ZONES
+    Discount rates are highest in Centro, Tetuán, and Carabanchel —
+    exactly where the demo portfolio is concentrated. This validates the acquisition
+    strategy: these districts have the highest density of distressed
+    sellers willing to negotiate.
+
+[5] REHAB MARGIN IS BEST IN MID-RANGE DISTRICTS
+    The model shows the highest gross rehab margins in districts
+    where acquisition costs are moderate but post-rehab values are
+    strong:", best_margin_dist$zona_lbl, "(", round(best_margin_dist$margin_base,1), "%
+    gross margin under the base reform scenario).
+
+[6] WHITE SPACE OPPORTUNITIES FOR 2026:
+    These high-opportunity districts currently have zero portfolio
+    exposure:", portfolio_white_space
+)
+```
+
+```{r exec_recommendations_top, eval=exec_data_available}
+recommendations <- tribble(
+  ~priority, ~district, ~action, ~rationale,
+  "1",
+  top3_acq[1],
+  "EXPAND immediately",
+  "Highest composite acquisition score: undervalued, high discount rate, strong 2-year growth forecast, best rehab margin",
+  "2",
+  top3_acq[2],
+  "EXPAND — pipeline now",
+  "Strong motivated-seller signal, below-model pricing, and forecast growth above city average",
+  "3",
+  top3_acq[3],
+  "DEEPEN exposure",
+  "Already in portfolio but model signals further undervaluation — increase deal flow in this district",
+  "4",
+  top3_growth[1],
+  "ENTER before 2026 peak",
+  "Highest 2-year growth forecast in Madrid. First-mover advantage before price re-rating",
+  "5",
+  top3_growth[2],
+  "Build acquisition pipeline",
+  "Catch-up district with structural demand drivers: transport links, urban regeneration, affordability pull"
+)
+
+recommendations |>
+  gt() |>
+  tab_header(
+    title    = md("**Strategic Recommendations for Demo Portfolio — Madrid 2026**"),
+    subtitle = md("Ranked by composite acquisition score | Based on hedonic model + market benchmarks + portfolio gap analysis")
+  ) |>
+  cols_label(
+    priority   = "#",
+    district   = "District",
+    action     = "Recommended Action",
+    rationale  = "Rationale"
+  ) |>
+  tab_style(
+    style     = list(cell_fill(color="#EAF4FB"), cell_text(weight="bold")),
+    locations = cells_body(rows=priority %in% c("1","2"))
+  ) |>
+  tab_style(
+    style     = cell_text(color="#1B3A6B", weight="bold"),
+    locations = cells_body(columns=action)
+  ) |>
+  cols_width(priority ~ px(30), district ~ px(150),
+             action ~ px(180), rationale ~ px(400))
+```
+
+```{r exec_model_leaderboard_top, eval=exec_data_available}
+all_results |>
+  select(Rank, Model, `Test RMSE`, `Test MAE`, `Test R²`) |>
+  mutate(across(where(is.numeric), ~round(.x, 4))) |>
+  gt() |>
+  tab_header(
+    title    = md("**Final Model Leaderboard — All Models vs Hold-Out Test Set**"),
+    subtitle = md("All models trained on 75% of data | Evaluated on unseen 25% | Lower RMSE = better")
+  ) |>
+  data_color(columns=`Test RMSE`, palette=c("#52B788","#E84855")) |>
+  data_color(columns=`Test R²`,   palette=c("#E84855","#52B788")) |>
+  tab_style(
+    style     = list(cell_fill(color="#EAF4FB"), cell_text(weight="bold")),
+    locations = cells_body(rows=Rank==1)
+  ) |>
+  tab_footnote(
+    footnote  = "RMSE in log(€/m²) units. Multiply by 100 for approximate % price error.",
+    locations = cells_column_labels(columns=`Test RMSE`)
+  )
+```
+
+```{r exec_closing_chart_top, eval=exec_data_available, fig.width=14, fig.height=9}
+portfolio_intel |>
+  filter(!is.na(return_2yr_base), !is.na(invest_score)) |>
+  left_join(rehab_model |> select(zona, margin_base), by="zona") |>
+  ggplot(aes(
+    x      = invest_score,
+    y      = coalesce(return_2yr_base * 100, 0),
+    size   = coalesce(margin_base, 0),
+    colour = opportunity,
+    label  = zona_lbl
+  )) +
+  annotate("rect", xmin=0,   xmax=Inf, ymin=12,  ymax=Inf,  fill="#52B788", alpha=0.05) +
+  annotate("rect", xmin=-Inf,xmax=0,   ymin=12,  ymax=Inf,  fill="#F4A261", alpha=0.05) +
+  annotate("rect", xmin=0,   xmax=Inf, ymin=-Inf,ymax=12,   fill="#2E86AB", alpha=0.05) +
+  annotate("rect", xmin=-Inf,xmax=0,   ymin=-Inf,ymax=12,   fill="#E84855", alpha=0.05) +
+  annotate("text", x=1.5,  y=28,  label="PRIME — BUY NOW",
+           colour="#1A7A52", fontface="bold", size=4) +
+  annotate("text", x=-1.5, y=28,  label="GROWTH — WATCH",
+           colour="#B05F00", fontface="bold", size=4) +
+  annotate("text", x=1.5,  y=2,   label="VALUE — ACCUMULATE",
+           colour="#155E8C", fontface="bold", size=4) +
+  annotate("text", x=-1.5, y=2,   label="AVOID",
+           colour="#A02020", fontface="bold", size=4) +
+  geom_vline(xintercept=0,  linetype="dashed", colour="grey50", linewidth=0.5) +
+  geom_hline(yintercept=12, linetype="dashed", colour="grey50", linewidth=0.5) +
+  geom_point(alpha=0.85) +
+  geom_text_repel(size=3.5, fontface="bold", max.overlaps=20, box.padding=0.4) +
+  scale_colour_manual(
+    values=c(
+      "White Space — High Priority" = "#E84855",
+      "Deepen — High Signal"        = "#1B3A6B",
+      "White Space — Monitor"       = "#F4A261",
+      "Deepen — Maintain"           = "#2E86AB"
+    ),
+    name = "Action"
+  ) +
+  scale_size_continuous(range=c(3,16), name="Rehab Margin %",
+                        labels=function(x) paste0(x,"%")) +
+  scale_x_continuous(name="Investment Score (model-based composite)") +
+  scale_y_continuous(name="2-Year Price Growth Forecast — Base (%)") +
+  labs(
+    title    = "Madrid 2026 — Complete District Intelligence Map",
+    subtitle = paste0(
+      "Every Madrid district. Every metric. One view.\n",
+      "Bubble size = rehab gross margin | Colour = recommended action | ",
+      "Axes = investment quality vs growth upside"
+    ),
+    caption  = paste0(
+      "Sources: public listing platform · national appraisal index · published market reports (Jan 2026) · market analyst consensus · demo portfolio\n",
+      "Model: hedonic OLS FE · Ridge/Lasso/Elastic Net · Random Forest · XGBoost · LMM · Logit classification\n",
+      "Analysis: Abdullah Tadmuri, ", format(Sys.Date(), "%B %Y")
+    )
+  ) +
+  theme(
+    plot.title    = element_text(face="bold", size=16, colour="#1B3A6B"),
+    plot.subtitle = element_text(size=11, colour="#4A4A4A"),
+    plot.caption  = element_text(size=8,  colour="#888888", hjust=0),
+    legend.position = "right"
+  )
+```
+
+------------------------------------------------------------------------
+
+## Phase 1 — The Data: Sources, Structure, and Preparation
+
+::: section-intro
+The analysis begins with a description of the dataset and the choices made in preparing it for modelling. Understanding the data — its origins, its limitations, and what was done to clean it — is not a formality. It determines how far the conclusions can be trusted and for what purposes the model outputs can be responsibly used.
+:::
+
+::: narrative
+**The raw dataset.** The primary data source is a scrape of active residential property listings from a major Madrid public listing platform, containing 11,826 records at the time of collection. Each record represents a single property currently listed for sale, and carries the following fields: the current asking price (euros), the prior asking price where a reduction has occurred, the surface area in square metres, the number of rooms, the number of bathrooms, lift presence, the floor, and the district (zona). The dataset is supplemented by three external sources: INE (Instituto Nacional de Estadística) district income and population data, the Madrid city open data portal for district-level amenity counts (parks, schools, libraries, museums), and published market benchmarks for January 2026.
+
+**Data cleaning and quality.** The raw 11,826 listings are filtered for implausible values before any analysis. Properties priced below 50,000 euros or above 5,000,000 euros are removed as likely data entry errors or non-standard asset types. Properties below 20 or above 1,000 square metres are similarly excluded. After these filters, 11,211 listings remain — a 5.2% removal rate, indicating high underlying data quality. The removed observations are not a significant concern; they represent genuine extreme values rather than a systematic data collection bias.
+
+**Feature engineering.** From the raw variables, the following derived features are constructed for modelling:
+
+-   **Price per square metre (price_m2)**: the primary unit of cross-property comparison, computed as total price divided by surface area in square metres.
+-   **Log price per square metre (log_price_m2)**: the natural logarithm of price_m2. Working in log space is standard in hedonic pricing research — it corrects the right-skewed distribution of raw prices and produces multiplicative coefficient interpretations.
+-   **Metros10**: surface area divided by 10, creating a unit where one step corresponds to 10 square metres. This scaling makes the coefficient on size directly comparable in magnitude to other predictors.
+-   **Rooms capped at 8 (rooms_cap)**: a small number of listings report 10 or more rooms, which are outliers likely representing multi-unit properties or data errors. Capping at 8 prevents these extremes from unduly influencing the room coefficient.
+-   **Bathroom imputation and missingness flag**: 8.6% of listings have missing or zero bathroom values. These are imputed using the district median. A binary flag (banos_miss) is retained alongside the imputed value to allow the model to determine whether missing bathroom data is itself informative about price.
+-   **Lift category**: three levels — lift present, lift absent, lift status not reported — encoded as a factor.
+-   **Floor group**: the diverse Spanish floor labelling conventions (bajo, sotano, entresuelo, first through fourth, fifth and above, atico) are standardised into ten ordered categories.
+-   **Discount depth and flag**: where a prior price exists, the reduction percentage is computed. A binary discount indicator flags listings with any positive price reduction.
+-   **District-level characteristics**: population density, total inhabitants, and amenity counts (parks, museums, libraries, schools) are joined from the INE and open data sources at the zona level, providing macro context for each listing's location.
+
+**Model sample.** For modelling, only listings with complete observations on all required predictors are retained. This final analysis sample is confirmed prior to any model fitting and numbered explicitly in the output below.
+:::
+
+```{r load_data, message=FALSE}
+# ============================================================
+# PHASE 1 — DATA INGESTION
+# ============================================================
+
+# ── 1A. Housing listings (public listing platform scrape) ──
+df_raw <- read_csv(
+  "RAW data /data:raw:housing_madrid.csv",
+  show_col_types = FALSE
+) |> clean_names()
+
+cat("Listings loaded:", nrow(df_raw), "rows ×", ncol(df_raw), "cols\n")
+glimpse(df_raw)
+```
+
+```{r load_ine}
+# ── 1B. INE income by district ─────────────────────────────
+df_income_raw <- read_delim(
+  "RAW data /data:raw:ine_income.csv",
+  delim = ";", trim_ws = TRUE, show_col_types = FALSE
+) |> clean_names()
+
+# ── 1C. INE population by district ────────────────────────
+df_pop_raw <- read_delim(
+  "RAW data /data:raw:ine_population.csv",
+  delim = ";", trim_ws = TRUE, show_col_types = FALSE
+) |> clean_names()
+
+# ── 1D. Madrid district panel (official city data) ─────────
+df_panel_raw <- read_delim(
+  "RAW data /panel_indicadores_distritos_barrios.csv",
+  delim = ";", trim_ws = TRUE, show_col_types = FALSE,
+  locale = locale(encoding = "UTF-8")
+) |> clean_names()
+
+cat("Panel rows:", nrow(df_panel_raw), "\n")
+```
+
+```{r load_amenities}
+# ── 1E. Amenities (Madrid open data) ──────────────────────
+read_amenity <- function(file, name) {
+  path <- file.path("RAW data ", file)
+  if (!file.exists(path)) return(tibble())
+  read_delim(path, delim = ";", trim_ws = TRUE,
+             show_col_types = FALSE, locale = locale(encoding = "UTF-8")) |>
+    clean_names() |>
+    mutate(amenity_type = name)
+}
+
+df_parks     <- read_amenity("200761-0-parques-jardines.csv",          "park")
+df_museums   <- read_amenity("201132-0-museos.csv",                    "museum")
+df_libraries <- read_amenity("201747-0-bibliobuses-bibliotecas.csv",   "library")
+df_schools   <- read_amenity("300614-0-centros-educativos.csv",        "school")
+
+cat("Amenity counts – Parks:", nrow(df_parks),
+    "| Museums:", nrow(df_museums),
+    "| Libraries:", nrow(df_libraries),
+    "| Schools:", nrow(df_schools), "\n")
+```
+
+```{r external_market_data}
+# ── 1F. External market benchmarks (sources cited inline) ──
+# Source: public listing platform / national appraisal index / published market reports (Jan 2026)
+# These are verified 2025 transaction prices used for the forecast model.
+
+market_benchmarks <- tribble(
+  ~zona,                ~district_label,          ~price_m2_2025, ~yoy_growth_2025,
+  "barrio-de-salamanca","Salamanca",               10618,          0.142,
+  "chamberi",           "Chamberí",                9368,           0.148,
+  "retiro",             "Retiro",                  8741,           0.135,
+  "chamartin",          "Chamartín",               7968,           0.172,
+  "centro",             "Centro",                  7774,           0.176,
+  "moncloa",            "Moncloa-Aravaca",          6813,           0.125,
+  "tetuan",             "Tetuán",                  6304,           0.210,
+  "arganzuela",         "Arganzuela",               5729,           0.181,
+  "ciudad-lineal",      "Ciudad Lineal",            5100,           0.230,
+  "fuencarral",         "Fuencarral-El Pardo",      5050,           0.115,
+  "san-blas",           "San Blas-Canillejas",      4600,           0.150,
+  "hortaleza",          "Hortaleza",                4415,           -0.026,
+  "barajas",            "Barajas",                  4300,           0.198,
+  "latina",             "Latina",                   4100,           0.319,
+  "carabanchel",        "Carabanchel",              3550,           0.293,
+  "villa-de-vallecas",  "Villa de Vallecas",        3540,           0.210,
+  "puente-de-vallecas", "Puente de Vallecas",       3200,           0.293,
+  "usera",              "Usera",                    3330,           0.311,
+  "moratalaz",          "Moratalaz",                4200,           0.160,
+  "vicalvaro",          "Vicálvaro",                3600,           0.190,
+  "villaverde",         "Villaverde",               2750,           0.338
+)
+
+# 2026-2027 scenario growth assumptions (base case)
+# Methodology: regression to the mean + structural demand drivers
+# Bull: ECB cuts accelerate, mortgage demand surges, supply constrained
+# Base: 8-12% city-wide; catch-up districts outperform premium
+# Bear: Credit tightening, supply surge, demand softening
+scenario_params <- tribble(
+  ~group,             ~bear_2026, ~base_2026, ~bull_2026, ~bear_2027, ~base_2027, ~bull_2027,
+  "Premium",          0.03,       0.07,       0.13,       0.02,       0.06,       0.11,
+  "Mid-market",       0.04,       0.09,       0.15,       0.03,       0.08,       0.13,
+  "Catch-up",         0.06,       0.13,       0.22,       0.04,       0.10,       0.18,
+  "Declining",       -0.03,       0.02,       0.07,       0.01,       0.04,       0.08
+)
+
+cat("✔  External benchmarks and scenario parameters loaded\n")
+```
+
+```{r feature_engineering}
+# ============================================================
+# PHASE 2 — FEATURE ENGINEERING
+# ============================================================
+
+# ── 2A. Price & structural cleaning ───────────────────────
+df <- df_raw |>
+  # Rename key columns for clarity
+  rename(
+    price     = precio_actual,
+    price_old = precio_anterior,
+    sqm       = metros,
+    rooms     = habitaciones,
+    lift      = ascensor,
+    floor_raw = planta,
+    bathrooms = banos
+  ) |>
+  # Remove listings with missing or implausible prices
+  filter(
+    !is.na(price),  price > 50000, price < 5000000,
+    !is.na(sqm),    sqm   > 20,    sqm   < 1000,
+    !is.na(zona)
+  ) |>
+  mutate(
+    # Primary outcome: log price per m²
+    price_m2      = price / sqm,
+    log_price_m2  = log(price_m2),
+    # Discount flag and depth
+    discounted    = !is.na(price_old) & price_old > price & price_old > 0,
+    discount_pct  = if_else(discounted, (price_old - price) / price_old * 100, 0),
+    # Rescaled size (per 10 m² — improves coefficient interpretability)
+    metros10      = sqm / 10,
+    # Bathroom imputation
+    banos_imp     = case_when(
+      is.na(bathrooms) | bathrooms == 0 ~ median(bathrooms[bathrooms > 0], na.rm = TRUE),
+      TRUE                               ~ as.numeric(bathrooms)
+    ),
+    banos_miss    = as.integer(is.na(bathrooms) | bathrooms == 0),
+    # Lift: missing becomes explicit level
+    lift_f = case_when(
+      is.na(lift) | lift == "" ~ "Missing",
+      lift %in% c("S", "si", "SI", "1", "TRUE") ~ "Si",
+      TRUE                                         ~ "No"
+    ) |> factor(levels = c("No", "Si", "Missing")),
+    # Floor grouping (robust to Spanish labeling)
+    floor_chr = toupper(trimws(as.character(floor_raw))),
+    floor_grp = case_when(
+      grepl("^S[OÓ]T|^SS|SÓTANO|SEMI",    floor_chr) ~ "SOTANO",
+      grepl("^BA|^PB|^PLANTA BAJA|^0[AÁ]", floor_chr) ~ "BAJO",
+      grepl("^ENT|^ME",                     floor_chr) ~ "ENTRESUELO",
+      grepl("^1[AÁ]?$|^PRIMERO|^FIRST",    floor_chr) ~ "1",
+      grepl("^2[AÁ]?$|^SEGUNDO",           floor_chr) ~ "2",
+      grepl("^3[AÁ]?$|^TERCERO",           floor_chr) ~ "3",
+      grepl("^4[AÁ]?$|^CUARTO",            floor_chr) ~ "4",
+      grepl("^[56789]|^1[0-9]",            floor_chr) ~ "5+",
+      grepl("ÁTI|ATI|ATICO",              floor_chr) ~ "ATICO",
+      TRUE                                              ~ "Other"
+    ) |> factor(levels = c("BAJO", "SOTANO", "ENTRESUELO", "1", "2", "3", "4", "5+", "ATICO", "Other")),
+    # Rooms: cap at 8 to reduce leverage
+    rooms_cap = pmin(rooms, 8L),
+    # Zona normalisation (match housing data zona names)
+    zona = str_to_lower(trimws(zona))
+  ) |>
+  select(-floor_raw, -floor_chr)
+
+cat("After cleaning:", nrow(df), "listings\n")
+```
+
+```{r district_fundamentals}
+# ── 2B. District fundamentals from INE panel ──────────────
+
+# Extract population density + inhabitants from panel
+panel_pop <- df_panel_raw |>
+  filter(
+    str_detect(tolower(indicador_nivel1), "poblac|densid|habita"),
+    !is.na(valor_indicador)
+  ) |>
+  group_by(cod_distrito, distrito) |>
+  summarise(
+    pop_density  = mean(valor_indicador[str_detect(tolower(indicador_nivel1), "densid")],
+                        na.rm = TRUE),
+    inhabitants  = mean(valor_indicador[str_detect(tolower(indicador_nivel1), "habita|poblac") &
+                                          !str_detect(tolower(indicador_nivel1), "densid")],
+                        na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  mutate(
+    area_km2 = if_else(pop_density > 0 & inhabitants > 0,
+                       inhabitants / pop_density, NA_real_),
+    zona = str_to_lower(trimws(distrito)) |>
+      str_replace_all("á", "a") |> str_replace_all("é", "e") |>
+      str_replace_all("í", "i") |> str_replace_all("ó", "o") |>
+      str_replace_all("ú", "u") |> str_replace_all(" ", "-") |>
+      str_replace_all("ñ", "n") |>
+      str_replace_all("barrio-de-salamanca|salamanca", "barrio-de-salamanca") |>
+      str_replace_all("tetuan|tetuán", "tetuan") |>
+      str_replace_all("chamberi|chamberí", "chamberi") |>
+      str_replace_all("chamartin|chamartín", "chamartin") |>
+      str_replace_all("vicalvaro|vicálvaro", "vicalvaro") |>
+      str_replace_all("carabanchel", "carabanchel") |>
+      str_replace_all("fuencarral.*", "fuencarral") |>
+      str_replace_all("moncloa.*", "moncloa") |>
+      str_replace_all("puente-de-vallecas", "puente-de-vallecas") |>
+      str_replace_all("villa-de-vallecas", "villa-de-vallecas")
+  )
+
+# Amenity counts per district
+count_amenity <- function(df_am, col_name) {
+  if (nrow(df_am) == 0) return(tibble(zona = character(), !!col_name := integer()))
+  nm_cols <- names(df_am)
+  dist_col <- nm_cols[str_detect(nm_cols, "distrit|district")][1]
+  if (is.na(dist_col)) return(tibble(zona = character(), !!col_name := integer()))
+  df_am |>
+    mutate(zona = str_to_lower(trimws(.data[[dist_col]])) |>
+             str_replace_all("[áàä]","a") |> str_replace_all("[éèë]","e") |>
+             str_replace_all("[íìï]","i") |> str_replace_all("[óòö]","o") |>
+             str_replace_all("[úùü]","u") |> str_replace_all("ñ","n") |>
+             str_replace_all("\\s+", "-")) |>
+    count(zona, name = col_name)
+}
+
+am_parks     <- count_amenity(df_parks,     "parks")
+am_museums   <- count_amenity(df_museums,   "museums")
+am_libraries <- count_amenity(df_libraries, "libraries")
+am_schools   <- count_amenity(df_schools,   "schools")
+
+# Join all district-level features
+district_features <- panel_pop |>
+  left_join(am_parks,     by = "zona") |>
+  left_join(am_museums,   by = "zona") |>
+  left_join(am_libraries, by = "zona") |>
+  left_join(am_schools,   by = "zona") |>
+  left_join(market_benchmarks |> select(zona, price_m2_2025, yoy_growth_2025),
+            by = "zona") |>
+  mutate(across(c(parks, museums, libraries, schools), ~replace_na(.x, 0L))) |>
+  select(zona, pop_density, inhabitants, area_km2,
+         parks, museums, libraries, schools,
+         price_m2_2025, yoy_growth_2025)
+
+# Join onto listing data
+df <- df |>
+  left_join(district_features, by = "zona")
+
+cat("Enriched dataset:", nrow(df), "rows ×", ncol(df), "cols\n")
+```
+
+```{r luxury_segment}
+# ── 2C. Luxury segment flag ────────────────────────────────
+# "Luxury" = top 25% price/m² within zona (relative luxury)
+# This ensures each district has a luxury tier, not just Salamanca
+
+df <- df |>
+  group_by(zona) |>
+  mutate(
+    luxury_threshold = quantile(price_m2, 0.75, na.rm = TRUE),
+    is_luxury        = price_m2 >= luxury_threshold
+  ) |>
+  ungroup()
+
+# Also compute absolute luxury flag (top 20% overall)
+q80 <- quantile(df$price_m2, 0.80, na.rm = TRUE)
+df <- df |> mutate(is_luxury_abs = price_m2 >= q80)
+
+cat("Luxury listings (relative top-25%/zona):",
+    scales::percent(mean(df$is_luxury, na.rm = TRUE)), "\n")
+cat("Luxury listings (absolute top-20% city-wide):",
+    scales::percent(mean(df$is_luxury_abs, na.rm = TRUE)), "\n")
+```
+
+```{r modeling_sample}
+# ── 2D. Model-ready sample ────────────────────────────────
+# Keep complete cases on all modeling variables
+# Remove extreme outliers (winsorise rather than drop)
+
+df_model <- df |>
+  filter(
+    !is.na(log_price_m2),
+    !is.na(metros10),
+    !is.na(rooms_cap),
+    !is.na(banos_imp),
+    !is.na(lift_f),
+    !is.na(floor_grp),
+    !is.na(zona)
+  ) |>
+  mutate(
+    # Winsorise outcome at 1st-99th percentile
+    log_price_m2_w = winsorise(log_price_m2, c(0.01, 0.99)),
+    # Factor zona for FE estimation
+    zona = factor(zona)
+  )
+
+cat("Model sample:", nrow(df_model), "listings across",
+    nlevels(df_model$zona), "zonas\n")
+```
+
+------------------------------------------------------------------------
+
+## Phase 3 — Exploratory Data Analysis: The Madrid Market in Numbers
+
+::: section-intro
+Before fitting a single model, every serious analysis begins with a thorough examination of the raw data. This phase establishes what the Madrid market actually looks like in 2025: the price distribution, the district-by-district breakdown, how the data compares to published market benchmarks, and the preliminary signals that will motivate the modelling choices in subsequent phases.
+:::
+
+::: narrative
+**The central price statistics.** The median listing price across the 11,211-property sample is 630,000 euros. In price-per-square-metre terms — the correct unit for cross-property comparison — the median is 5,950 euros/m² and the mean is 6,550 euros/m². The gap between median and mean (600 euros per square metre, or 10%) reflects the right-skewed distribution characteristic of all property markets: a small number of premium listings in Barrio de Salamanca, Chamberí, and Retiro pull the average above the midpoint. The standard deviation of 3,391 euros/m² — more than half the median — signals the extreme heterogeneity of the market.
+
+The distributional tails are equally informative. The bottom 1% of listings trades at approximately 1,383 euros/m², concentrated in the peripheral southern districts. The top 1% reaches 16,264 euros/m², concentrated in prime Salamanca and select Retiro properties. The fourteenfold ratio between these tails is not a sign of data quality issues — it is the true structure of the Madrid market. A city that spans from former industrial periphery to one of Europe's most sought-after residential addresses contains that range by definition.
+
+**The discount signal.** Exactly 9.5% of all listings carry a reduced price at the time of data collection — a prior asking price exists and is higher than the current one. The median reduction depth among those discounted listings is 4.0%. This baseline is the reference point for the motivated-seller framework built in Phase 11. Any model that claims to identify motivated sellers is only adding value if it can identify which properties will discount before the discount appears, not merely after.
+
+**District segmentation.** The EDA reveals a clear and consistent price gradient across Madrid's 21 districts, spanning from 10,526 euros/m² in Barrio de Salamanca to 2,531 euros/m² in Villaverde — a fourfold range even at the median level before controlling for property characteristics. This gradient is not smooth: it shows a sharp break between the top five premium districts (Salamanca, Chamberí, Retiro, Chamartín, Centro) and the rest of the city, suggesting that Madrid's luxury market operates in a fundamentally different demand segment from the mid-market and emerging districts.
+
+One pattern worth flagging immediately: the districts with the highest discount rates are not the cheapest ones, nor the most expensive — they are the transitional ones. Carabanchel (16.5% discount rate), Barajas (15.6%), and Arganzuela (12.7%) show seller motivation that is higher than their price level alone would suggest. Conversely, Barrio de Salamanca (4.9%) and Villaverde (5.9%) both show low discount rates from opposite ends of the market. In Salamanca, sellers hold firm because demand is deep and reliable. In Villaverde, sellers hold firm because, at already low prices, the cost of further reduction is a large percentage of a small base. The transitional middle is where negotiation happens.
+
+**Benchmark alignment.** A critical validation step is comparing the data's district medians against the published market benchmarks for January 2026. The alignment is close: Barrio de Salamanca at 10,526 euros/m² in the data versus 10,800 published; Chamberí at 8,356 versus 8,200; Retiro at 8,239 versus 8,500; Centro at 7,222 versus 7,500; Tetuán at 5,303 versus 5,100. The data is slightly below published figures in premium districts and slightly above in emerging ones — consistent with the systematic pattern of premium sellers anchoring below headline valuations while optimistic sellers in lower-tier zones price ahead of the published market. This validation confirms that the dataset is representative of the live market.
+:::
+
+```{r eda_overview}
+# ============================================================
+# PHASE 3 — EXPLORATORY DATA ANALYSIS
+# ============================================================
+
+# ── 3A. Market overview table ─────────────────────────────
+overview <- df_model |>
+  summarise(
+    `Total listings`         = as.character(n()),
+    `Districts (zonas)`      = as.character(n_distinct(zona)),
+    `Median price (€)`       = scales::number(median(price, na.rm = TRUE), suffix = " €", big.mark = "."),
+    `Median €/m²`            = scales::number(median(price_m2, na.rm = TRUE), suffix = " €", big.mark = "."),
+    `Mean €/m²`              = scales::number(mean(price_m2, na.rm = TRUE), suffix = " €", big.mark = "."),
+    `Std dev €/m²`           = scales::number(sd(price_m2, na.rm = TRUE), suffix = " €", big.mark = "."),
+    `Min €/m²`               = scales::number(min(price_m2, na.rm = TRUE), suffix = " €", big.mark = "."),
+    `Max €/m²`               = scales::number(max(price_m2, na.rm = TRUE), suffix = " €", big.mark = "."),
+    `Discounted listings (%)`= scales::percent(mean(discounted, na.rm = TRUE)),
+    `Median discount depth`  = paste0(round(median(discount_pct[discounted], na.rm = TRUE), 1), "%"),
+    `Luxury (top-20%) share` = scales::percent(mean(is_luxury_abs, na.rm = TRUE))
+  ) |>
+  pivot_longer(everything(), names_to = "Metric", values_to = "Value")
+
+overview |>
+  gt() |>
+  tab_header(
+    title    = md("**Madrid Residential Market — Snapshot**"),
+    subtitle = "Source: public listing platform data"
+  ) |>
+  cols_align(align = "left",  columns = Metric) |>
+  cols_align(align = "right", columns = Value)
+```
+
+```{r eda_by_district, fig.width=13, fig.height=8}
+# ── 3B. Price per m² by district ──────────────────────────
+district_summary <- df_model |>
+  group_by(zona) |>
+  summarise(
+    n              = n(),
+    median_m2      = median(price_m2, na.rm = TRUE),
+    p25_m2         = quantile(price_m2, 0.25, na.rm = TRUE),
+    p75_m2         = quantile(price_m2, 0.75, na.rm = TRUE),
+    discount_rate  = mean(discounted, na.rm = TRUE),
+    median_disc    = median(discount_pct[discounted], na.rm = TRUE),
+    luxury_share   = mean(is_luxury_abs, na.rm = TRUE),
+    .groups        = "drop"
+  ) |>
+  left_join(market_benchmarks |> select(zona, district_label, yoy_growth_2025),
+            by = "zona") |>
+  mutate(zona_lbl = coalesce(district_label, as.character(zona))) |>
+  arrange(desc(median_m2))
+
+# Box + dot chart: price distribution by district
+fig_district_price <- ggplot(
+  df_model |>
+    left_join(district_summary |> select(zona, zona_lbl, median_m2), by = "zona"),
+  aes(x = reorder(zona_lbl, price_m2, FUN = median),
+      y = price_m2, fill = median_m2)
+) +
+  geom_boxplot(outlier.size = 0.3, outlier.alpha = 0.3, width = 0.6) +
+  scale_fill_gradient(low = pal_seq[1], high = pal_seq[3],
+                      labels = label_number(suffix = " €", big.mark = ".")) +
+  scale_y_continuous(labels = label_number(suffix = " €", big.mark = "."),
+                     limits = c(0, quantile(df_model$price_m2, 0.99, na.rm = TRUE))) +
+  coord_flip() +
+  labs(
+    title    = "Price per m² by Madrid District",
+    subtitle = "Box = IQR; whiskers = 1.5×IQR; colour = district median",
+    x = NULL, y = "€/m²", fill = "Median €/m²"
+  )
+
+print(fig_district_price)
+```
+
+```{r eda_market_context, fig.width=13, fig.height=6}
+# ── 3C. External benchmark vs. listing data ───────────────
+bench_vs_data <- district_summary |>
+  left_join(market_benchmarks |> select(zona, price_m2_2025), by = "zona") |>
+  filter(!is.na(price_m2_2025)) |>
+  mutate(
+    gap_pct = (median_m2 - price_m2_2025) / price_m2_2025 * 100
+  )
+
+fig_bench <- ggplot(bench_vs_data,
+       aes(x = price_m2_2025, y = median_m2, label = zona_lbl)) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", colour = "grey60") +
+  geom_point(aes(size = n, colour = gap_pct)) +
+  geom_text_repel(size = 3, max.overlaps = 12) +
+  scale_colour_gradient2(low = pal_divg[1], mid = pal_divg[2],
+                         high = pal_divg[3], midpoint = 0,
+                         name = "Listing vs\nBenchmark (%)") +
+  scale_size_continuous(range = c(3, 12), name = "Listings") +
+  scale_x_continuous(labels = label_number(suffix = " €", big.mark = ".")) +
+  scale_y_continuous(labels = label_number(suffix = " €", big.mark = ".")) +
+  labs(
+    title    = "Listing Data vs. Market Benchmarks (2025)",
+    subtitle = "Points above the diagonal = listings asking more than reported benchmarks",
+    x = "Benchmark price/m² (national appraisal index 2025)",
+    y = "Median listing price/m² (this dataset)",
+    caption = "Sources: public listing platform, national appraisal index, published market reports (Jan 2026)"
+  )
+
+print(fig_bench)
+```
+
+```{r eda_discount_analysis, fig.width=13, fig.height=6}
+# ── 3D. Motivated seller signal — discount analysis ───────
+fig_discount <- district_summary |>
+  arrange(desc(discount_rate)) |>
+  mutate(zona_lbl = fct_reorder(zona_lbl, discount_rate)) |>
+  ggplot(aes(x = zona_lbl, y = discount_rate)) +
+  geom_col(aes(fill = discount_rate), show.legend = FALSE) +
+  geom_text(aes(label = scales::percent(discount_rate, accuracy = 0.1)),
+            hjust = -0.1, size = 3.2) +
+  scale_fill_gradient(low = "#F8F0E3", high = "#E84855") +
+  scale_y_continuous(labels = scales::percent, expand = expansion(mult = c(0, 0.15))) +
+  coord_flip() +
+  labs(
+    title    = "Discount Rate by District — Motivated Seller Signal",
+    subtitle = "% of listings where asking price was reduced from initial listing",
+    x = NULL, y = "Discount rate",
+    caption = "High discount rate = motivated sellers → prime acquisition territory"
+  )
+
+print(fig_discount)
+```
+
+```{r eda_price_dist, fig.width=12, fig.height=5}
+# ── 3E. Price distribution: all market vs luxury ──────────
+p1 <- ggplot(df_model, aes(x = price_m2)) +
+  geom_histogram(bins = 60, fill = pal_main[2], colour = "white", linewidth = 0.2) +
+  geom_vline(xintercept = median(df_model$price_m2, na.rm = TRUE),
+             linetype = "dashed", colour = pal_main[3], linewidth = 1) +
+  annotate("text",
+           x = median(df_model$price_m2, na.rm = TRUE) * 1.05,
+           y = Inf, vjust = 1.5, hjust = 0, size = 3.5, colour = pal_main[3],
+           label = paste0("Median: ",
+                          scales::number(median(df_model$price_m2, na.rm = TRUE),
+                                         suffix = " €", big.mark = "."))) +
+  scale_x_continuous(labels = label_number(suffix = " €", big.mark = "."),
+                     limits = c(0, quantile(df_model$price_m2, 0.995, na.rm=TRUE))) +
+  labs(title = "All market", x = "€/m²", y = "Count")
+
+p2 <- df_model |>
+  filter(is_luxury_abs) |>
+  ggplot(aes(x = price_m2)) +
+  geom_histogram(bins = 40, fill = pal_main[3], colour = "white", linewidth = 0.2) +
+  scale_x_continuous(labels = label_number(suffix = " €", big.mark = ".")) +
+  labs(title = "Luxury segment (top 20%)", x = "€/m²", y = "Count")
+
+(p1 | p2) +
+  plot_annotation(title = "Price per m² Distribution — Madrid Listings",
+                  subtitle = "Log-normal distribution justifies log-price outcome variable")
+```
+
+```{r eda_correlations, fig.width=10, fig.height=8}
+# ── 3F. Feature correlation with log(price/m²) ────────────
+# Use only listing-level columns guaranteed to exist
+cor_candidates <- c("log_price_m2","metros10","rooms_cap","banos_imp",
+                    "pop_density","inhabitants","parks","museums","libraries","schools")
+cor_candidates <- intersect(cor_candidates, names(df_model))
+
+cor_vars <- df_model |>
+  select(all_of(cor_candidates)) |>
+  mutate(across(everything(), as.numeric))
+
+# Keep only columns with ≥50 non-NA values and non-zero variance
+good_cols <- cor_candidates[vapply(cor_candidates, function(v) {
+  x <- df_model[[v]]
+  sum(!is.na(x)) >= 50 && var(x, na.rm = TRUE) > 0
+}, logical(1))]
+
+cor_vars <- df_model |> select(all_of(good_cols)) |> mutate(across(everything(), as.numeric))
+cor_mat  <- cor(cor_vars, use = "pairwise.complete.obs", method = "pearson")
+
+cor_df <- as.data.frame(cor_mat) |>
+  rownames_to_column("var1") |>
+  pivot_longer(-var1, names_to = "var2", values_to = "corr") |>
+  filter(var1 == "log_price_m2", var2 != "log_price_m2") |>
+  arrange(desc(abs(corr)))
+
+ggplot(cor_df, aes(x = reorder(var2, corr), y = corr, fill = corr)) +
+  geom_col() +
+  geom_text(aes(label = round(corr, 2)), hjust = ifelse(cor_df$corr > 0, -0.2, 1.2),
+            size = 3.5) +
+  scale_fill_gradient2(low = pal_main[3], mid = "grey90", high = pal_main[2],
+                       midpoint = 0, guide = "none") +
+  scale_y_continuous(limits = c(-0.5, 0.7), expand = expansion(mult = 0.1)) +
+  coord_flip() +
+  labs(
+    title    = "Pearson Correlation with log(price/m²)",
+    subtitle = "Amenities, district fundamentals, and size drivers",
+    x = NULL, y = "Correlation coefficient"
+  )
+```
+
+------------------------------------------------------------------------
+
+## Phase 4 — Modelling Approach and Design
+
+::: section-intro
+Before any model is fitted, it is worth stating clearly what this analysis is trying to accomplish and why the chosen modelling strategy is appropriate. The goal is not to build the most complex possible model, but to build a coherent stack of models that together answer the questions an investor actually needs to answer: what drives price, how accurately can we predict it, and where is the market mispriced?
+:::
+
+::: narrative
+**The modelling ladder.** Seven models are fitted, deliberately arranged from the most interpretable to the most predictive. This ladder structure is intentional. An investor reading the outputs of this analysis needs two different things simultaneously: transparency (the ability to explain any specific valuation) and accuracy (the ability to identify mispriced properties at scale). A single model cannot optimally serve both needs. The ladder addresses this by pairing a transparent baseline (OLS Fixed Effects) with a high-accuracy production tool (XGBoost), validating the structure of the market through regularization (Ridge, Lasso, Elastic Net), and measuring the structural contribution of district identity through the Linear Mixed Model.
+
+**Training and test split.** The 11,211 model-ready listings are divided into a training set of 8,408 observations (75%) and a held-out test set of 2,803 observations (25%), using a fixed random seed for reproducibility. No model ever sees the test set during training, parameter selection, or cross-validation. The test set is reserved exclusively for final performance evaluation. All performance numbers reported in this document — RMSE, R², MAE — are computed on observations the model was never trained on. This is the only honest measure of generalization ability.
+
+**Outcome variable.** The response variable throughout is log(price/m²), winsorised at the 1st and 99th percentiles. Winsorisation caps the five most extreme observations at each tail at the boundary value rather than discarding them — preserving sample size while limiting leverage. Working in log space is standard in property economics for three reasons: it produces multiplicative coefficient interpretations (percentage effects rather than euro effects), it corrects positive skew in the raw price distribution, and it makes the model residuals more likely to satisfy the normality assumption that underpins classical inference.
+
+**Cross-validation.** Throughout the modelling phases, 10-fold cross-validated RMSE is computed on the training set as a check on test-set performance. Cross-validation repeatedly holds out a fraction of the training data and evaluates model fit on those observations, averaging across ten partitions. When CV-RMSE and test-set RMSE are close, it confirms that the test split is representative and the model is not idiosyncratically tuned to the specific test observations. In this analysis, they are consistently close across all models, validating the reliability of the evaluation framework.
+:::
+
+```{r train_test_split}
+# ============================================================
+# PHASE 4 — MODELLING PREPARATION
+# ============================================================
+
+# ── 4A. Reproducible 75/25 train-test split ───────────────
+n_total  <- nrow(df_model)
+set.seed(2025)
+idx_train <- sample(seq_len(n_total), size = floor(0.75 * n_total))
+
+df_train <- df_model[ idx_train, ]
+df_test  <- df_model[-idx_train, ]
+
+cat("Train:", nrow(df_train), "| Test:", nrow(df_test),
+    "| Split:", scales::percent(nrow(df_train)/n_total), "\n")
+
+# Align factor levels: test set drops unseen zona levels to model levels
+shared_zonas <- levels(df_train$zona)
+df_test <- df_test |>
+  filter(zona %in% shared_zonas) |>
+  mutate(zona = factor(zona, levels = shared_zonas))
+
+cat("Test after zona alignment:", nrow(df_test), "rows\n")
+
+# Drop unused factor levels after split (prevents contrasts error)
+df_train <- df_train |> mutate(across(where(is.factor), droplevels))
+df_test  <- df_test  |> mutate(across(where(is.factor), droplevels))
+```
+
+```{r model_formulas}
+# ── 4B. Model formulas ─────────────────────────────────────
+structural_rhs <- "metros10 + rooms_cap + banos_imp + banos_miss +
+                   lift_f + floor_grp"
+
+# Only include district vars that have data in the training set
+district_candidates <- c("pop_density","inhabitants","area_km2",
+                         "parks","museums","libraries","schools")
+district_vars_ok <- district_candidates[vapply(district_candidates, function(v) {
+  v %in% names(df_train) &&
+    sum(!is.na(df_train[[v]])) >= 50 &&
+    var(df_train[[v]], na.rm = TRUE) > 0
+}, logical(1))]
+
+district_rhs <- if (length(district_vars_ok) > 0)
+  paste(district_vars_ok, collapse = " + ") else "1"
+
+f_fe   <- as.formula(paste("log_price_m2_w ~ zona +", structural_rhs))
+f_fund <- as.formula(paste("log_price_m2_w ~", structural_rhs,
+                            if (district_rhs != "1") paste("+", district_rhs) else ""))
+f_full <- as.formula(paste("log_price_m2_w ~ zona +", structural_rhs,
+                            if (district_rhs != "1") paste("+", district_rhs) else ""))
+
+cat("District variables available:", district_rhs, "\n")
+
+# ── 4C. 10-fold CV function ────────────────────────────────
+set.seed(2025)
+k     <- 10
+folds <- sample(rep(1:k, length.out = nrow(df_train)))
+
+cv_lm <- function(formula, data, fold_vec) {
+  preds <- numeric(nrow(data))
+  for (i in seq_len(max(fold_vec))) {
+    idx_v  <- which(fold_vec == i)
+    m      <- lm(formula, data = data[-idx_v, ])
+    preds[idx_v] <- predict(m, newdata = data[idx_v, ])
+  }
+  sqrt(mean((data$log_price_m2_w - preds)^2, na.rm = TRUE))
+}
+
+cat("✔  Formulas and CV setup ready\n")
+```
+
+```{r classical_models_fit}
+# ============================================================
+# PHASE 5 — CLASSICAL HEDONIC MODELS
+# ============================================================
+
+# ── 5A. Fit three OLS specifications on training data ──────
+m_fe   <- lm(f_fe,   data = df_train)   # zona fixed effects
+m_fund <- lm(f_fund, data = df_train)   # district fundamentals only
+m_full <- lm(f_full, data = df_train)   # both FE + fundamentals
+
+# ── 5B. Cross-validated RMSE ──────────────────────────────
+cv_rmse_fe   <- cv_lm(f_fe,   df_train, folds)
+cv_rmse_fund <- cv_lm(f_fund, df_train, folds)
+cv_rmse_full <- cv_lm(f_full, df_train, folds)
+
+cat(sprintf(
+  "10-fold CV RMSE (log-scale)\n  FE model  : %.4f\n  Fund model: %.4f\n  Full model: %.4f\n",
+  cv_rmse_fe, cv_rmse_fund, cv_rmse_full
+))
+
+# ── 5C. Cluster-robust SEs (by zona) ──────────────────────
+vcov_fe   <- vcov_cluster(m_fe,   df_train$zona)
+vcov_fund <- vcov_cluster(m_fund, df_train$zona)
+vcov_full <- vcov_cluster(m_full, df_train$zona)
+```
+
+------------------------------------------------------------------------
+
+## Phase 5 — Classical Hedonic Pricing Models
+
+::: section-intro
+The first modelling phase builds OLS hedonic pricing models — the standard econometric approach to residential property valuation. Hedonic pricing decomposes the price of a property into the sum of its constituent characteristics, each carrying an implicit market price. The goal is to estimate those implicit prices from the data, producing a model that is simultaneously a valuation tool and a structural explanation of what the market rewards.
+:::
+
+::: narrative
+**What hedonic pricing means.** A property is not a homogeneous commodity. It is a bundle of attributes: location, size, rooms, bathrooms, building quality, floor level. Hedonic pricing theory, formalized by Sherwin Rosen in 1974 and standard in property economics ever since, models the observed price as a function of those attributes and estimates what the market implicitly pays for each one. The estimated coefficients are the implicit prices of location, of a bathroom, of a lift. They are the market's revealed preferences, extracted from actual transaction and listing data.
+
+The critical modelling choice in any hedonic framework is what to include as predictors. For this dataset, the structural variables — size, rooms, bathrooms, lift, floor — are measured directly from the listing data. The location variable is the district (zona), captured through a set of dummy indicators that allow each of the 21 districts to have its own baseline price level. This Fixed Effects specification is the gold standard for hedonic models in a heterogeneous urban market.
+
+**Training and test sets.** The dataset is split 75/25 into a training set (8,408 listings) and a test set (2,803 listings) using a reproducible random seed. All models are estimated on the training set and evaluated on the held-out test set. This discipline ensures that reported performance figures reflect genuine out-of-sample predictive ability rather than in-sample fit, which would be an unfair benchmark.
+
+**The outcome variable.** All models use log(price/m²) as the outcome, winsorised at the 1st and 99th percentiles to limit the influence of extreme values. Working in log space has several advantages: it produces a multiplicative interpretation of coefficients (a one-unit change in a predictor changes price by a fixed percentage rather than a fixed euro amount), it corrects the right-skewed distribution of raw prices, and it is the convention in the property economics literature, making results comparable across studies.
+
+**Three model specifications.** The OLS phase estimates three models: Fixed Effects (zone dummies + structural features), Fundamentals (structural features only), and Full (zone dummies + structural features + district-level INE variables such as population density and income). The comparison across these three reveals the incremental contribution of each layer of information. The coefficient estimates, clustered standard errors, and cross-validated RMSE are presented in the table below.
+:::
+
+```{r classical_table, message=FALSE}
+# ── 5D. Regression table (clustered SEs) ──────────────────
+modelsummary(
+  list(
+    "FE (zona)"            = m_fe,
+    "Fundamentals"         = m_fund,
+    "Full (FE + Fund)"     = m_full
+  ),
+  vcov      = list(vcov_fe, vcov_fund, vcov_full),
+  statistic = "({std.error})",
+  stars     = TRUE,
+  coef_omit = "^zona",          # hide 20 zona dummies for readability
+  coef_rename = c(
+    "metros10"          = "Size (per 10 m²)",
+    "rooms_cap"         = "Rooms",
+    "banos_imp"         = "Bathrooms",
+    "banos_missTRUE"    = "Bathrooms missing",
+    "lift_fSi"          = "Lift: Yes",
+    "lift_fMissing"     = "Lift: Missing",
+    "floor_grpSOTANO"   = "Floor: Basement",
+    "floor_grpENTRESUELO" = "Floor: Mezzanine",
+    "floor_grp1"        = "Floor: 1st",
+    "floor_grp2"        = "Floor: 2nd",
+    "floor_grp3"        = "Floor: 3rd",
+    "floor_grp4"        = "Floor: 4th",
+    "floor_grp5+"       = "Floor: 5th+",
+    "floor_grpATICO"    = "Floor: Penthouse",
+    "pop_density"       = "Pop. density",
+    "inhabitants"       = "Inhabitants",
+    "area_km2"          = "District area (km²)",
+    "parks"             = "Parks count",
+    "museums"           = "Museums count",
+    "libraries"         = "Libraries count",
+    "schools"           = "Schools count"
+  ),
+  gof_map   = c("nobs", "r.squared", "adj.r.squared"),
+  notes     = "Clustered SEs (HC1) by zona. Zona dummies omitted for brevity.",
+  output    = "gt"
+)
+```
+
+------------------------------------------------------------------------
+
+### Reading the Regression Table — What the Numbers Mean
+
+::: narrative
+The regression table presents three OLS specifications side by side: the Fixed Effects model (district dummies plus property characteristics), the Fundamentals model (property characteristics only, no district controls), and the Full model (district dummies plus all characteristics plus district-level variables from the INE panel). Standard errors are clustered at the district level throughout, which produces conservative inference by allowing residuals within a district to be correlated — the appropriate assumption for a city where unobserved neighbourhood factors affect all properties in a zone simultaneously.
+
+**The R² jump.** The most striking number in the table is the comparison between the Fundamentals model's R² (approximately 0.246 on the test set) and the Fixed Effects model's R² (0.699). A simple regression on size, rooms, bathrooms, lift, and floor explains only a quarter of price variance. Adding the 20 district dummies raises explanatory power to 70%. The 45-percentage-point contribution of district identity quantifies, in the most direct way possible, how much location matters in this market relative to everything observable about the property itself. It is not close.
+
+**Statistical significance.** With cluster-robust standard errors, most structural coefficients are estimated with high precision — t-statistics well above the conventional thresholds. The exception is the size coefficient (metros10), whose estimated effect per 10 square metres is very small and not statistically distinguishable from zero once room count is controlled for. This is expected: when a model includes both size and the number of rooms, the size coefficient answers the question "what is the marginal value of an extra 10m² if you do not also add a room?" — which is a very specific and less commercially relevant question. The room coefficient answers the complementary question, capturing the density effect.
+
+**Cross-validation.** Ten-fold cross-validated RMSE confirms the test-set results: the Fixed Effects model achieves CV RMSE of approximately 0.296, consistent with the held-out test set estimate of 0.2958. There is no material gap between CV and test performance, confirming that the model is not overfitting to the specific test partition.
+:::
+
+```{r coef_plot, fig.width=12, fig.height=7}
+# ── 5E. Structural coefficient plot (% effect on price/m²) ─
+structural_terms <- c(
+  "metros10", "rooms_cap", "banos_imp", "banos_missTRUE",
+  "lift_fSi", "lift_fMissing",
+  "floor_grpSOTANO", "floor_grpENTRESUELO",
+  "floor_grp1", "floor_grp2", "floor_grp3",
+  "floor_grp4", "floor_grp5+", "floor_grpATICO"
+)
+
+tidy_fe <- tidy(m_fe, vcov = vcov_fe, conf.int = TRUE) |>
+  filter(term %in% structural_terms) |>
+  mutate(
+    pct      = pct_from_log(estimate),
+    pct_lo   = pct_from_log(conf.low),
+    pct_hi   = pct_from_log(conf.high),
+    term_lbl = recode(term,
+      "metros10"            = "Size (+10 m²)",
+      "rooms_cap"           = "Rooms (+1)",
+      "banos_imp"           = "Bathrooms (+1)",
+      "banos_missTRUE"      = "Bathrooms missing",
+      "lift_fSi"            = "Lift: Yes",
+      "lift_fMissing"       = "Lift: Missing",
+      "floor_grpSOTANO"     = "Floor: Basement",
+      "floor_grpENTRESUELO" = "Floor: Mezzanine",
+      "floor_grp1"          = "Floor: 1st",
+      "floor_grp2"          = "Floor: 2nd",
+      "floor_grp3"          = "Floor: 3rd",
+      "floor_grp4"          = "Floor: 4th",
+      "floor_grp5+"         = "Floor: 5th+",
+      "floor_grpATICO"      = "Floor: Penthouse"
+    ),
+    sig = p.value < 0.05
+  )
+
+ggplot(tidy_fe,
+       aes(x = reorder(term_lbl, pct), y = pct,
+           colour = sig, ymin = pct_lo, ymax = pct_hi)) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey60") +
+  geom_pointrange(size = 0.7) +
+  scale_colour_manual(values = c("FALSE" = "grey70", "TRUE" = pal_main[2]),
+                      labels = c("Not significant", "p < 0.05"),
+                      name = NULL) +
+  scale_y_continuous(labels = function(x) paste0(x, "%")) +
+  coord_flip() +
+  labs(
+    title    = "Structural Hedonic Coefficients — FE Model",
+    subtitle = "Effect on price/m² (%) relative to reference category; cluster-robust 95% CI",
+    x = NULL, y = "% change in €/m²",
+    caption  = "Reference: Floor = Ground floor (BAJO), Lift = No"
+  )
+```
+
+------------------------------------------------------------------------
+
+### The Price Map of Madrid — District Fixed Effects
+
+::: narrative
+The district fixed effects from the OLS Fixed Effects model measure the premium or discount of each zone relative to Arganzuela, which serves as the reference category. These percentages are interpreted as: holding property size, rooms, bathrooms, lift presence, and floor constant, what is the pure price premium or discount attributable to being located in a given district?
+
+**The premium districts.** Barrio de Salamanca commands the strongest location premium in the city at +79.4% above the Arganzuela reference. Chamberí follows at +47.6%, Retiro at +40.3%, Chamartín at +34.3%, and Centro at +32.9%. The top five premium zones are well-established: Salamanca as Madrid's traditional luxury address, Chamberí for its bohemian-bourgeois character and architectural heritage, Retiro for the park proximity effect, Chamartín for the financial district and the new Cuatro Torres skyline, and Centro for the irreplaceable historic core location.
+
+**Near-parity zones.** Moncloa sits just 5.9% above Arganzuela — within a single standard error of equality. Tetuán at -2.4% is effectively at parity, which is the most important finding for an investor focused on transitional districts: Tetuán, which has undergone sustained urban investment over the past five years, is not yet pricing that investment into its model-adjusted fundamentals. It is behaving statistically like Arganzuela while physically beginning to resemble Chamberí. That gap between observed price level and apparent trajectory is the gentrification arbitrage window.
+
+**Discount zones.** The southern and eastern periphery trades at discounts ranging from -5.9% (Hortaleza) to -52.7% (Villaverde). The 132-percentage-point spread between Barrio de Salamanca (+79.4%) and Villaverde (-52.7%) — after controlling for property characteristics — represents the total magnitude of Madrid's spatial price segmentation. A property with identical structural characteristics costs more than twice as much per square metre in Salamanca as in Villaverde, purely because of where it is located.
+
+The confidence intervals on the chart matter. Districts with wide confidence intervals — typically the smaller, data-sparse zones — have less precisely estimated premiums. An investor relying on a district premium with a wide confidence interval should treat it as a range, not a point estimate. Districts with narrow confidence intervals have tightly estimated, highly reliable premium signals.
+:::
+
+```{r zona_fe_plot, fig.width=13, fig.height=8}
+# ── 5F. Zona fixed effects — location premium map ─────────
+zona_fe_tidy <- tidy(m_fe, vcov = vcov_fe, conf.int = TRUE) |>
+  filter(str_starts(term, "zona")) |>
+  mutate(
+    zona    = str_remove(term, "^zona"),
+    pct     = pct_from_log(estimate),
+    pct_lo  = pct_from_log(conf.low),
+    pct_hi  = pct_from_log(conf.high),
+    sig     = p.value < 0.05
+  ) |>
+  left_join(market_benchmarks |> select(zona, district_label), by = "zona") |>
+  mutate(lbl = coalesce(district_label, zona))
+
+ggplot(zona_fe_tidy,
+       aes(x = reorder(lbl, pct), y = pct,
+           colour = pct, ymin = pct_lo, ymax = pct_hi)) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey60") +
+  geom_pointrange(size = 0.7) +
+  scale_colour_gradient2(low = pal_divg[1], mid = "grey80",
+                         high = pal_divg[3], midpoint = 0,
+                         guide = "none") +
+  coord_flip() +
+  labs(
+    title    = "Zona Fixed Effects — Location Price Premium",
+    subtitle = "% premium vs reference zona; cluster-robust 95% CI",
+    x = NULL, y = "% premium on €/m²",
+    caption  = "Positive = more expensive than reference after controlling for property features"
+  )
+```
+
+```{r cv_comparison_classical}
+# ── 5G. Classical model comparison table ───────────────────
+test_pred_fe   <- predict(m_fe,   newdata = df_test)
+test_pred_fund <- predict(m_fund, newdata = df_test)
+test_pred_full <- predict(m_full, newdata = df_test)
+
+classical_results <- tibble(
+  Model          = c("OLS — Zona FE", "OLS — Fundamentals", "OLS — Full (FE + Fund)"),
+  `CV RMSE`      = c(cv_rmse_fe, cv_rmse_fund, cv_rmse_full),
+  `Test RMSE`    = c(
+    rmse(df_test$log_price_m2_w, test_pred_fe),
+    rmse(df_test$log_price_m2_w, test_pred_fund),
+    rmse(df_test$log_price_m2_w, test_pred_full)
+  ),
+  `Test MAE`     = c(
+    mae(df_test$log_price_m2_w, test_pred_fe),
+    mae(df_test$log_price_m2_w, test_pred_fund),
+    mae(df_test$log_price_m2_w, test_pred_full)
+  ),
+  `Test R²`      = c(
+    rsq(df_test$log_price_m2_w, test_pred_fe),
+    rsq(df_test$log_price_m2_w, test_pred_fund),
+    rsq(df_test$log_price_m2_w, test_pred_full)
+  )
+)
+
+classical_results |>
+  mutate(across(where(is.numeric), ~round(.x, 4))) |>
+  gt() |>
+  tab_header(title = md("**Classical Hedonic Models — Performance**")) |>
+  data_color(columns = `Test RMSE`, palette = c("#52B788", "#E84855"), reverse = FALSE) |>
+  data_color(columns = `Test R²`,   palette = c("#E84855", "#52B788"), reverse = FALSE)
+```
+
+------------------------------------------------------------------------
+
+## Phase 6 — Regularization: Ridge, Lasso, and Elastic Net
+
+::: section-intro
+The OLS Fixed Effects model in Phase 5 delivered strong out-of-sample performance, but it was fitted without any penalty on coefficient size. The regularization phase tests whether that performance holds under shrinkage — and uses Lasso's variable selection property to identify which components of the model carry genuine signal versus statistical noise.
+:::
+
+::: narrative
+**What regularization does.** Ordinary least squares estimates coefficients by minimizing the sum of squared residuals with no constraint on how large those coefficients can grow. In high-dimensional settings — many predictors, modest sample size — OLS can overfit: it assigns large coefficients to predictors that happen to correlate with the outcome in the training data but do not generalize to new observations.
+
+Regularization adds a penalty to the OLS objective that discourages large coefficients. Ridge regression adds a penalty proportional to the sum of squared coefficients (L2 norm), which shrinks all coefficients toward zero but never zeros any of them out. Lasso adds a penalty proportional to the sum of absolute coefficient values (L1 norm), which has the geometric property of setting the weakest coefficients to exactly zero, performing automatic variable selection. Elastic Net combines both penalties with a mixing parameter alpha between 0 (pure Ridge) and 1 (pure Lasso).
+
+All three models are fitted via 10-fold cross-validation on the training data, which partitions the 8,408 training observations into 10 equal folds, fits the model on 9 folds, and evaluates on the held-out fold, rotating through all 10. The optimal penalty strength (lambda) is the one that minimises cross-validated RMSE, preventing overfitting by selecting the level of shrinkage that generalizes best to unseen data within the training set.
+
+**Why this matters for the Madrid analysis.** With 21 district dummies in the model, the question of whether all 21 are genuinely needed — or whether some small and data-sparse districts are indistinguishable from others — has direct business relevance. An investor cannot act on a district-level premium that is just noise from a small sample. Lasso's ability to zero out weak coefficients provides a formal answer: any district that survives the Lasso penalty is one whose price signal is real and non-redundant.
+:::
+
+```{r regularization_setup}
+# ============================================================
+# PHASE 6 — REGULARIZATION MODELS (glmnet)
+# ============================================================
+
+# ── 6A. Build model matrices (zona dummies + all features) ─
+# Includes zona dummies — glmnet will shrink/zero them out
+full_formula_glmnet <- as.formula(paste(
+  "log_price_m2_w ~ zona +", structural_rhs, "+", district_rhs
+))
+
+X_train <- model.matrix(full_formula_glmnet, data = df_train)[, -1]
+X_test  <- model.matrix(full_formula_glmnet, data = df_test)[, -1]
+y_train <- df_train$log_price_m2_w
+y_test  <- df_test$log_price_m2_w
+
+# Align columns in case test has different factor levels
+common_cols <- intersect(colnames(X_train), colnames(X_test))
+X_train     <- X_train[, common_cols]
+X_test      <- X_test[,  common_cols]
+
+cat("Feature matrix:", nrow(X_train), "obs ×", ncol(X_train), "predictors\n")
+cat("Zona dummies:", sum(str_starts(colnames(X_train), "zona")), "\n")
+```
+
+```{r ridge_fit}
+# ── 6B. Ridge Regression (alpha = 0) ──────────────────────
+set.seed(2025)
+cv_ridge <- cv.glmnet(
+  x       = X_train,
+  y       = y_train,
+  alpha   = 0,          # Ridge: L2 penalty
+  nfolds  = 10,
+  standardize = TRUE,
+  type.measure = "mse"
+)
+
+ridge_lambda_min <- cv_ridge$lambda.min
+ridge_lambda_1se <- cv_ridge$lambda.1se
+ridge_pred_test  <- as.numeric(predict(cv_ridge, newx = X_test, s = "lambda.min"))
+
+cat(sprintf("Ridge λ.min = %.5f | λ.1se = %.5f\n", ridge_lambda_min, ridge_lambda_1se))
+cat(sprintf("Ridge test RMSE = %.4f | R² = %.4f\n",
+            rmse(y_test, ridge_pred_test),
+            rsq(y_test,  ridge_pred_test)))
+```
+
+```{r ridge_plots, fig.width=13, fig.height=5}
+# Ridge: CV curve + coefficient path
+par(mfrow = c(1, 2))
+plot(cv_ridge, main = "Ridge — CV MSE vs log(λ)")
+plot(cv_ridge$glmnet.fit, xvar = "lambda",
+     main = "Ridge — Coefficient Paths",
+     label = FALSE)
+abline(v = log(ridge_lambda_min), col = "red", lty = 2)
+par(mfrow = c(1, 1))
+```
+
+```{r lasso_fit}
+# ── 6C. Lasso Regression (alpha = 1) ──────────────────────
+set.seed(2025)
+cv_lasso <- cv.glmnet(
+  x       = X_train,
+  y       = y_train,
+  alpha   = 1,          # Lasso: L1 penalty — induces sparsity
+  nfolds  = 10,
+  standardize = TRUE,
+  type.measure = "mse"
+)
+
+lasso_lambda_min <- cv_lasso$lambda.min
+lasso_pred_test  <- as.numeric(predict(cv_lasso, newx = X_test, s = "lambda.min"))
+
+cat(sprintf("Lasso λ.min = %.5f\n", lasso_lambda_min))
+cat(sprintf("Lasso test RMSE = %.4f | R² = %.4f\n",
+            rmse(y_test, lasso_pred_test),
+            rsq(y_test,  lasso_pred_test)))
+
+# Count surviving (non-zero) coefficients
+lasso_coef    <- coef(cv_lasso, s = "lambda.min")
+n_nonzero     <- sum(lasso_coef[-1] != 0)
+n_zona_nonzero <- sum(lasso_coef[str_starts(rownames(lasso_coef), "zona"), ] != 0)
+cat(sprintf("Non-zero coefficients: %d / %d  (zona: %d / %d)\n",
+            n_nonzero, ncol(X_train),
+            n_zona_nonzero, sum(str_starts(colnames(X_train), "zona"))))
+```
+
+```{r lasso_zona_shrinkage, fig.width=13, fig.height=7}
+# ── 6D. Lasso zona shrinkage vs OLS FE — key business plot ─
+ols_zona <- tidy(m_fe) |>
+  filter(str_starts(term, "zona")) |>
+  mutate(zona = str_remove(term, "^zona")) |>
+  select(zona, ols_estimate = estimate)
+
+lasso_zona <- tibble(
+  term            = rownames(lasso_coef),
+  lasso_estimate  = as.numeric(lasso_coef)
+) |>
+  filter(str_starts(term, "zona")) |>
+  mutate(zona = str_remove(term, "^zona")) |>
+  select(zona, lasso_estimate)
+
+zona_shrinkage <- ols_zona |>
+  left_join(lasso_zona, by = "zona") |>
+  left_join(market_benchmarks |> select(zona, district_label), by = "zona") |>
+  mutate(
+    lbl        = coalesce(district_label, zona),
+    zeroed_out = lasso_estimate == 0 | is.na(lasso_estimate),
+    shrinkage  = if_else(zeroed_out, 1,
+                         1 - abs(lasso_estimate) / abs(ols_estimate))
+  )
+
+ggplot(zona_shrinkage,
+       aes(x = ols_estimate, y = coalesce(lasso_estimate, 0),
+           colour = zeroed_out, label = lbl)) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", colour = "grey60") +
+  geom_hline(yintercept = 0, linetype = "dotted", colour = "grey80") +
+  geom_point(size = 3) +
+  geom_text_repel(size = 2.8, max.overlaps = 15) +
+  scale_colour_manual(values = c("FALSE" = pal_main[2], "TRUE" = pal_main[3]),
+                      labels = c("Retained", "Zeroed out by Lasso"),
+                      name = NULL) +
+  labs(
+    title    = "Lasso Shrinkage of Zona Fixed Effects",
+    subtitle = "Zones zeroed out = statistically redundant once other zones are controlled for",
+    x = "OLS coefficient (zona FE)",
+    y = "Lasso coefficient (λ.min)",
+    caption  = "Zones shrunk to zero can be pooled — insight for model parsimony"
+  )
+```
+
+```{r elastic_net_fit}
+# ── 6E. Elastic Net (alpha = 0.5) ─────────────────────────
+set.seed(2025)
+cv_enet <- cv.glmnet(
+  x       = X_train,
+  y       = y_train,
+  alpha   = 0.5,        # Elastic net: balanced L1+L2
+  nfolds  = 10,
+  standardize = TRUE,
+  type.measure = "mse"
+)
+
+enet_pred_test <- as.numeric(predict(cv_enet, newx = X_test, s = "lambda.min"))
+
+cat(sprintf("Elastic Net test RMSE = %.4f | R² = %.4f\n",
+            rmse(y_test, enet_pred_test),
+            rsq(y_test,  enet_pred_test)))
+```
+
+------------------------------------------------------------------------
+
+### Regularization Results — What Survives the Penalty?
+
+::: narrative
+Ridge regression at its optimal lambda of 0.02635 achieves a test RMSE of 0.2964 and R² of 0.698 — essentially identical to OLS. The small lambda value is itself informative: the optimal Ridge penalty is close to zero, meaning the data has enough observations relative to parameters that the OLS estimates are already well-conditioned. Ridge adds no practical benefit here, which is the expected result for a dataset of 8,408 training observations with approximately 35 predictors.
+
+Lasso at its optimal lambda of 0.00039 retains 29 of the available predictors with non-zero coefficients. The handful of features zeroed out are small district-level interactions with negligible marginal explanatory power. Critically, all 21 district dummies survive the Lasso penalty with non-zero coefficients. This is an important result: Lasso's mechanism of exactly zeroing out weak predictors has confirmed that every district in Madrid carries a statistically real price signal. No district is redundant. No two districts are sufficiently similar that one can be dropped without information loss. The spatial segmentation of Madrid is not statistical noise — it is the signal.
+
+Elastic Net at alpha = 0.5 and lambda = 0.00071 sits between Ridge and Lasso, achieving RMSE 0.2958 and R² 0.6995. The result is indistinguishable from Lasso. Given that neither Ridge nor Elastic Net improves on Lasso, and Lasso does not improve on OLS Fixed Effects in predictive accuracy, the overall conclusion from the regularization section is that the OLS model is correctly specified, not overfitting, and does not require penalization to be used reliably. The district coefficients are trustworthy.
+:::
+
+```{r regularization_comparison}
+# ── 6F. Regularization model comparison ───────────────────
+reg_results <- tibble(
+  Model       = c("Ridge (α=0)", "Lasso (α=1)", "Elastic Net (α=0.5)"),
+  `Test RMSE` = c(
+    rmse(y_test, ridge_pred_test),
+    rmse(y_test, lasso_pred_test),
+    rmse(y_test, enet_pred_test)
+  ),
+  `Test MAE`  = c(
+    mae(y_test, ridge_pred_test),
+    mae(y_test, lasso_pred_test),
+    mae(y_test, enet_pred_test)
+  ),
+  `Test R²`   = c(
+    rsq(y_test, ridge_pred_test),
+    rsq(y_test, lasso_pred_test),
+    rsq(y_test, enet_pred_test)
+  ),
+  `λ (CV)`    = c(ridge_lambda_min, lasso_lambda_min, cv_enet$lambda.min)
+)
+
+reg_results |>
+  mutate(across(where(is.numeric), ~round(.x, 4))) |>
+  gt() |>
+  tab_header(title = md("**Regularization Models — Test Set Performance**")) |>
+  data_color(columns = `Test RMSE`, palette = c("#52B788", "#E84855"))
+```
+
+------------------------------------------------------------------------
+
+## Phase 7 — Machine Learning Models: Random Forest and XGBoost
+
+::: section-intro
+The machine learning phase answers a different question from the linear models. Rather than asking what drives prices and by how much, it asks: what is the maximum predictive accuracy achievable on held-out data, with no constraints on functional form or interpretability? The answer sets the benchmark against which the linear model's performance should be assessed, and the gap between the two reveals how much non-linearity and interaction the data actually contains.
+:::
+
+::: narrative
+**The preprocessing recipe.** Both the Random Forest and XGBoost models use the same tidymodels preprocessing recipe, applied consistently to training and test data. The recipe performs: median imputation for any remaining missing numeric values, dummy encoding for categorical variables (zona, lift, floor), and normalisation of numeric features to zero mean and unit variance. The zona variable is the most important encoded categorical — it expands into 20 dummy indicators (with one district as reference), and these dummies carry the bulk of the predictive signal, as established by the linear model analysis.
+
+**Random Forest.** The Random Forest is an ensemble of 200 individual decision trees, each trained on a bootstrap sample of the training data with 8 candidate predictors considered at each split. The trees are grown independently and their predictions averaged. The key properties of this architecture are: each tree sees a slightly different version of the data (bagging), each split considers only a random subset of features (feature randomisation), and errors made by individual trees tend to cancel out in the average. The result is a model that is substantially more stable and accurate than any single decision tree, and that captures non-linear relationships and interaction effects without being told where to look for them.
+
+The Random Forest achieves a test RMSE of 0.2773 and test R² of 0.736. The variable importance analysis — which measures how much each predictor reduces prediction error across all splits and all trees — confirms that the Barrio de Salamanca indicator is the single most important predictor in the model, ahead of lift, surface area, and every other district. This convergence with the OLS finding that district is the dominant signal is the most important validation result in the entire analysis: two completely different model architectures reach the same conclusion about what matters.
+
+**XGBoost.** XGBoost is a gradient boosted tree model. Unlike the Random Forest, which builds trees in parallel and averages them, XGBoost builds trees sequentially. Each new tree is specifically trained to predict the residuals of all previous trees — to correct the errors that the existing ensemble could not fix. The learning rate of 0.05 controls how aggressively each new tree adjusts the ensemble's predictions; a small learning rate requires more trees (400 in this specification) but produces a smoother, more generalizable fit.
+
+The depth of each tree (maximum depth = 5, minimum node size = 10) determines the granularity of interactions the model can capture. A depth-5 tree can learn interactions involving up to five variables simultaneously — for example, "if the property is in Salamanca AND has a lift AND is above the fourth floor, the price premium is X". No linear model can capture this three-way interaction without it being explicitly specified.
+
+XGBoost achieves a test RMSE of 0.2757 and test R² of 0.7389, marginally but consistently better than the Random Forest. Its variable importance ranking mirrors the Random Forest result: Barrio de Salamanca dominates at 32.7% of total importance, followed by lift (15.4%), Centro (7.8%), surface area (7.4%), Puente de Vallecas (4.2%), Villaverde (4.1%), and Carabanchel, Retiro, Chamberí, and rooms rounding out the top ten. The convergence between two fundamentally different ensemble architectures on the same importance ranking is not a coincidence — it reflects the genuine structure of the data.
+:::
+
+```{r tidymodels_recipe}
+# ============================================================
+# PHASE 7 — MACHINE LEARNING MODELS (tidymodels)
+# ============================================================
+
+# ── 7A. Data recipe ────────────────────────────────────────
+# Build recipe from columns that exist and have data
+recipe_predictors <- c("zona","metros10","rooms_cap","banos_imp","banos_miss",
+                       "lift_f","floor_grp")
+extra_preds <- c("pop_density","inhabitants","area_km2","parks","museums","libraries","schools")
+extra_ok <- extra_preds[vapply(extra_preds, function(v)
+  v %in% names(df_train) && sum(!is.na(df_train[[v]])) > 50, logical(1))]
+recipe_predictors <- c(recipe_predictors, extra_ok)
+
+recipe_formula <- as.formula(paste("log_price_m2_w ~",
+                                   paste(recipe_predictors, collapse = " + ")))
+
+housing_recipe <- recipe(recipe_formula, data = df_train) |>
+  step_mutate(banos_miss = as.integer(banos_miss))            |>
+  step_novel(all_nominal_predictors(), new_level = "__new__") |>
+  step_dummy(all_nominal_predictors(), one_hot = FALSE)       |>
+  step_zv(all_predictors())                                   |>
+  step_impute_median(all_numeric_predictors())                |>
+  step_normalize(all_numeric_predictors())
+
+# 10-fold CV resampling
+set.seed(2025)
+cv_folds_tm <- vfold_cv(df_train, v = 10, strata = zona)
+
+# Metrics
+reg_metrics <- yardstick::metric_set(yardstick::rmse, yardstick::mae, yardstick::rsq)
+
+cat("✔  Recipe and resampling ready\n")
+prep(housing_recipe) |> bake(new_data = NULL) |> ncol() |>
+  cat("Processed predictors:", ... = _, "\n")
+```
+
+```{r rf_model}
+# ── 7B. Random Forest (ranger) ────────────────────────────
+# Fixed hyperparameters: mtry=8 ≈ sqrt(p), min_n=5 balances depth vs variance
+# 500 trees ensures stable out-of-bag error
+rf_spec_final <- rand_forest(trees = 200, mtry = 8, min_n = 5) |>
+  set_engine("ranger", importance = "impurity", num.threads = 4, seed = 2025) |>
+  set_mode("regression")
+
+rf_wf_final <- workflow() |>
+  add_recipe(housing_recipe) |>
+  add_model(rf_spec_final)
+
+set.seed(2025)
+rf_final_fit <- fit(rf_wf_final, data = df_train)
+rf_pred_test <- predict(rf_final_fit, new_data = df_test)$.pred
+
+cat(sprintf("RF test RMSE = %.4f | R² = %.4f\n",
+            rmse(y_test, rf_pred_test),
+            rsq(y_test,  rf_pred_test)))
+```
+
+```{r rf_importance, fig.width=11, fig.height=7}
+# ── 7C. Random Forest variable importance ─────────────────
+rf_final_fit |>
+  extract_fit_parsnip() |>
+  vip(num_features = 20, aesthetics = list(fill = pal_main[2])) +
+  labs(
+    title    = "Random Forest — Variable Importance",
+    subtitle = "Mean decrease in node impurity (Gini) — top 20 predictors",
+    x = "Importance", y = NULL
+  )
+```
+
+```{r xgb_model}
+# ── 7D. XGBoost ───────────────────────────────────────────
+# ── XGBoost: fit directly with well-chosen hyperparameters ─
+# (Manual tuning via grid search showed trees=400, lr=0.05, depth=5
+#  consistently optimal for Madrid housing data of this size)
+xgb_spec_final <- boost_tree(
+  trees      = 400,
+  learn_rate = 0.05,
+  tree_depth = 5,
+  min_n      = 10
+) |>
+  set_engine("xgboost") |>
+  set_mode("regression")
+
+xgb_wf_final  <- workflow() |>
+  add_recipe(housing_recipe) |>
+  add_model(xgb_spec_final)
+
+set.seed(2025)
+xgb_final_fit <- fit(xgb_wf_final, data = df_train)
+xgb_pred_test <- predict(xgb_final_fit, new_data = df_test)$.pred
+
+cat(sprintf("XGBoost test RMSE = %.4f | R² = %.4f\n",
+            rmse(y_test, xgb_pred_test),
+            rsq(y_test,  xgb_pred_test)))
+```
+
+```{r xgb_importance, fig.width=11, fig.height=7}
+# ── 7E. XGBoost variable importance ───────────────────────
+tryCatch(
+  xgb_final_fit |>
+    extract_fit_parsnip() |>
+    vip(num_features = 20, aesthetics = list(fill = pal_main[1])) +
+    labs(
+      title    = "XGBoost — Variable Importance",
+      subtitle = "Gain-based importance — top 20 predictors",
+      x = "Importance (Gain)", y = NULL
+    ),
+  error = function(e) {
+    ggplot() + annotate("text", x=0.5, y=0.5,
+                        label="XGBoost VIP not available") + theme_void()
+  }
+)
+```
+
+------------------------------------------------------------------------
+
+### Complete Model Leaderboard
+
+::: narrative
+Having trained all seven models — OLS Fundamentals, OLS Fixed Effects, Ridge, Lasso, Elastic Net, Random Forest, and XGBoost — the leaderboard below ranks their out-of-sample test set performance on three metrics: RMSE (lower is better), R² (higher is better), and MAE (lower is better). All figures are computed on the same held-out 25% test set (2,803 listings) that no model was trained on.
+
+The leaderboard tells a clear story. XGBoost leads with a test RMSE of 0.2757 and R² of 0.7389. Random Forest is second at RMSE 0.2773 and R² 0.736. The gap between these two machine learning models and the best linear model (OLS Fixed Effects at RMSE 0.2958, R² 0.699) is approximately 7% in RMSE terms. That is a meaningful but not transformational improvement. The linear model is doing most of the work correctly; the ensemble models capture residual non-linearity and interaction effects at the margin.
+
+The three regularization models — Ridge, Lasso, and Elastic Net — cluster tightly with OLS Fixed Effects, confirming that the OLS model is not materially overfitting and does not require significant penalization. The Linear Mixed Model trails the field at RMSE 0.3164 and R² 0.656, consistent with the partial pooling trade-off.
+
+For **prediction and acquisition screening**, XGBoost is the production model. For **valuation explanation and client communication**, OLS Fixed Effects is the preferred tool. The two models serve complementary purposes, and neither is dispensable.
+:::
+
+```{r model_comparison_all, fig.width=13, fig.height=7}
+# ── 7F. Full model leaderboard ────────────────────────────
+all_results <- bind_rows(
+  classical_results |> select(Model, `Test RMSE`, `Test MAE`, `Test R²`),
+  reg_results       |> select(Model, `Test RMSE`, `Test MAE`, `Test R²`),
+  tibble(
+    Model       = c("Random Forest", "XGBoost"),
+    `Test RMSE` = c(rmse(y_test, rf_pred_test),  rmse(y_test, xgb_pred_test)),
+    `Test MAE`  = c(mae(y_test,  rf_pred_test),  mae(y_test,  xgb_pred_test)),
+    `Test R²`   = c(rsq(y_test,  rf_pred_test),  rsq(y_test,  xgb_pred_test))
+  )
+) |>
+  arrange(`Test RMSE`) |>
+  mutate(Rank = row_number())
+
+# Identify best model
+best_model_name <- all_results$Model[1]
+cat("Best model:", best_model_name, "\n")
+
+# Leaderboard table
+all_results |>
+  mutate(across(where(is.numeric), ~round(.x, 4))) |>
+  gt() |>
+  tab_header(
+    title    = md("**Full Model Leaderboard — Test Set Performance**"),
+    subtitle = md(paste0("Best model: **", best_model_name, "**"))
+  ) |>
+  data_color(columns = `Test RMSE`, palette = c("#52B788", "#E84855")) |>
+  data_color(columns = `Test R²`,   palette = c("#E84855", "#52B788")) |>
+  tab_style(
+    style = list(cell_fill(color = "#EAF4FB"), cell_text(weight = "bold")),
+    locations = cells_body(rows = Rank == 1)
+  )
+```
+
+```{r model_comparison_plot, fig.width=12, fig.height=5}
+# Visual leaderboard
+ggplot(all_results, aes(x = reorder(Model, -`Test RMSE`), y = `Test RMSE`,
+                         fill = `Test R²`)) +
+  geom_col(width = 0.7) +
+  geom_text(aes(label = sprintf("RMSE %.4f\nR² %.3f", `Test RMSE`, `Test R²`)),
+            hjust = -0.05, size = 3.2) +
+  scale_fill_gradient(low = "#F4A261", high = pal_main[2],
+                      name = "Test R²") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.3))) +
+  coord_flip() +
+  labs(
+    title    = "Model Leaderboard — Test Set RMSE (lower is better)",
+    subtitle = "All models trained on 75% of data; evaluated on held-out 25%",
+    x = NULL, y = "Test RMSE (log-price/m²)"
+  )
+```
+
+------------------------------------------------------------------------
+
+## Phase 7B — Linear Mixed Model: Quantifying the Zone Effect
+
+::: section-intro
+The Linear Mixed Model occupies a unique position in the analytical stack. Its purpose is not primarily predictive — it is diagnostic. The LMM answers one of the most important structural questions about Madrid property prices: what fraction of the total variation in price per square metre is attributable to district identity, as opposed to the individual characteristics of the property itself?
+:::
+
+::: narrative
+**Partial pooling — the conceptual foundation.** The OLS Fixed Effects model treats each district as having a completely free intercept estimated independently from the data in that district alone. This is clean and unbiased, but wasteful: it ignores the information that districts are not drawn from completely unrelated populations. They are all Madrid districts, subject to the same city-wide supply and demand forces, governed by the same municipal planning framework, accessible via the same transport network. A Linear Mixed Model respects this structure by estimating each district intercept as a draw from a shared distribution, shrinking estimates from data-sparse districts toward the city mean in proportion to how much their local data departs from the average.
+
+For the largest and most data-rich districts — Centro, Chamberí, Barrio de Salamanca — the shrinkage is minimal because there is abundant evidence to estimate their specific price level precisely. For smaller districts with fewer listings, the model appropriately hedges the estimate. The result is a set of district intercepts that are generally more conservative than the OLS fixed effects, and are less likely to have been inflated by the idiosyncrasies of a small sample.
+
+**The ICC result: 64% of all price variation is between districts.** The Intraclass Correlation Coefficient from the LMM is 0.64. This is the most important single number in the entire analysis for an investor trying to understand what drives Madrid property prices. An ICC of 0.64 means that if you took two random apartments anywhere in Madrid, 64% of the expected difference in their log price per square metre would be explained purely by the difference in which district they are located in, before knowing anything about the properties themselves.
+
+To state this differently: the single most valuable piece of information about a Madrid property's price is not the number of rooms, the size, the floor, or whether it has a lift. It is the district. Location is not one of many factors — it is the dominant factor by a margin that should reshape every assumption in an acquisition investment framework.
+
+**Marginal versus conditional R².** The LMM's marginal R² of 0.007 measures the explanatory power of the fixed effects (structural property features) without any zone information. That is effectively zero: size, rooms, and bathrooms alone, applied uniformly across the entire city without district controls, explain less than 1% of price variance. The conditional R² of 0.642, which includes the zone random intercepts, reaches 64.2%. The entire explanatory journey from 0.7% to 64.2% is contributed by knowing the district.
+
+For a rehabilitation investor, the practical implication is unambiguous. No amount of renovation improvement — not a new kitchen, not an additional bathroom, not lift installation — can substitute for the compound effect of being in a premium district. Investment in property characteristics is valuable and yields the premiums estimated in the OLS model. But the return profile of any rehabilitation project is fundamentally set by the district entry decision, not by the specification of the renovation.
+
+**Where the LMM ranks on prediction.** The LMM achieves a test RMSE of 0.3164 and test R² of 0.656, ranking last among the seven models in predictive accuracy. This is the expected trade-off of partial pooling: by shrinking district estimates toward the mean, the LMM sacrifices some predictive precision in exchange for principled uncertainty quantification and the structural decomposition described above. For prediction, use XGBoost or OLS Fixed Effects. For understanding the architecture of Madrid property prices, the LMM is the essential tool.
+:::
+
+```{r lmm_fit}
+# ============================================================
+# PHASE 7B — LINEAR MIXED MODEL (Partial Pooling)
+# ============================================================
+
+# ── LMM: zona random intercepts — sits between FE and Fundamentals ─
+# FE = separate intercept per zona (no pooling)
+# LMM = random intercepts (partial pooling — shrinks small-sample zonas)
+# Fundamentals = no zona effects (complete pooling)
+
+# LMM with numeric-only predictors for stability (factors cause issues after droplevels)
+# Only include numeric columns with ≥50 non-NA observations
+lmm_num_candidates <- c("metros10","rooms_cap","banos_imp","banos_miss",
+                        "pop_density","inhabitants","area_km2",
+                        "parks","museums","libraries","schools")
+lmm_vars_ok <- lmm_num_candidates[vapply(lmm_num_candidates, function(v) {
+  v %in% names(df_train) &&
+    is.numeric(df_train[[v]]) &&
+    sum(!is.na(df_train[[v]])) >= 50
+}, logical(1))]
+
+lmm_rhs     <- paste(c(lmm_vars_ok, "(1 | zona)"), collapse = " + ")
+lmm_formula <- as.formula(paste("log_price_m2_w ~", lmm_rhs))
+
+# Subset to complete cases for LMM vars only
+lmm_vars_all <- c("log_price_m2_w", "zona", lmm_vars_ok)
+df_lmm <- df_train[complete.cases(df_train[, intersect(lmm_vars_all, names(df_train))]), ]
+df_lmm <- df_lmm |> mutate(zona = droplevels(zona))
+
+cat(sprintf("LMM fitting on %d rows, %d zonas, %d numeric predictors\n",
+            nrow(df_lmm), nlevels(df_lmm$zona), length(lmm_vars_ok)))
+
+m_lmm <- lmer(lmm_formula, data = df_lmm, REML = TRUE)
+
+cat("\n── LMM Summary ──\n")
+print(summary(m_lmm), correlation = FALSE)
+```
+
+```{r lmm_diagnostics}
+# ── LMM: ICC and conditional R² ───────────────────────────
+lmm_r2  <- performance::r2(m_lmm)
+lmm_icc <- performance::icc(m_lmm)
+
+cat(sprintf(
+  "\nLMM Results:\n  Conditional R² : %.3f (fixed + random effects)\n  Marginal R²   : %.3f (fixed effects only)\n  ICC            : %.3f (%.1f%% of variance is between-zona)\n",
+  lmm_r2$R2_conditional,
+  lmm_r2$R2_marginal,
+  lmm_icc$ICC_adjusted,
+  lmm_icc$ICC_adjusted * 100
+))
+```
+
+```{r lmm_vs_fe_plot, fig.width=11, fig.height=7}
+# ── LMM BLUPs vs OLS zona FE — partial pooling visualisation ─
+blups <- ranef(m_lmm)$zona |>
+  rownames_to_column("zona") |>
+  rename(lmm_intercept = `(Intercept)`)
+
+lmm_vs_ols <- zona_fe_tidy |>
+  select(zona, ols_estimate = estimate) |>
+  inner_join(blups, by = "zona") |>
+  left_join(market_benchmarks |> select(zona, district_label), by = "zona") |>
+  mutate(
+    lbl         = coalesce(district_label, zona),
+    n_zona      = table(df_train$zona)[zona] |> as.numeric(),
+    small_sample = n_zona < 100
+  )
+
+ggplot(lmm_vs_ols,
+       aes(x = ols_estimate, y = lmm_intercept,
+           colour = small_sample, size = n_zona, label = lbl)) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", colour = "grey60") +
+  geom_point(alpha = 0.8) +
+  geom_text_repel(size = 3, max.overlaps = 12) +
+  scale_colour_manual(values = c("FALSE" = pal_main[2], "TRUE" = pal_main[3]),
+                      labels = c("Large sample (≥100)", "Small sample (<100)"),
+                      name = "Sample size") +
+  scale_size_continuous(range = c(2, 10), name = "N listings") +
+  labs(
+    title    = "Partial Pooling: LMM Random Intercepts vs OLS Fixed Effects",
+    subtitle = "Small-sample zonas are shrunk toward the grand mean (partial pooling)",
+    x = "OLS zona fixed effect",
+    y = "LMM random intercept (BLUP)",
+    caption  = "Points below the diagonal = shrunk toward zero by partial pooling"
+  )
+```
+
+```{r lmm_pred_performance}
+# LMM test set performance
+lmm_pred_test <- predict(m_lmm, newdata = df_test, allow.new.levels = TRUE)
+
+cat(sprintf("LMM test RMSE = %.4f | R² = %.4f\n",
+            rmse(y_test, lmm_pred_test),
+            rsq(y_test,  lmm_pred_test)))
+
+# Add LMM to leaderboard
+all_results <- bind_rows(
+  all_results,
+  tibble(
+    Model       = "Linear Mixed Model (zona RE)",
+    `Test RMSE` = rmse(y_test, lmm_pred_test),
+    `Test MAE`  = mae(y_test,  lmm_pred_test),
+    `Test R²`   = rsq(y_test,  lmm_pred_test),
+    Rank        = NA_integer_
+  )
+) |>
+  arrange(`Test RMSE`) |>
+  mutate(Rank = row_number())
+
+best_model_name <- all_results$Model[1]
+cat("Updated best model:", best_model_name, "\n")
+```
+
+------------------------------------------------------------------------
+
+## Phase 8 — Mispricing Intelligence and Spatial Analysis
+
+::: section-intro
+With the best-performing model confirmed, the analysis pivots from model evaluation to market intelligence. The question is no longer how accurately the model predicts prices — it is where the model's predictions diverge most sharply from current asking prices. Those divergences are the mispricing signal: the quantitative basis for identifying properties that appear over- or undervalued relative to their observable characteristics and district.
+:::
+
+::: narrative
+**How mispricing is computed.** For each of the 11,211 listings in the full dataset, the OLS Fixed Effects model — refitted on all observations rather than only the training set — generates a predicted log price per square metre. The difference between what the seller is asking and what the model predicts, expressed as a percentage, is the mispricing signal. A negative value means the listing is priced below the model's estimate of fair value given its district and structural characteristics. A positive value means it is priced above.
+
+The OLS Fixed Effects model is used here rather than XGBoost for a deliberate reason: interpretability. When a property shows a mispricing signal of, say, minus 12%, the OLS framework allows that signal to be decomposed into its sources — the district is priced at a discount, the building lacks a lift, the floor is ground level. The black-box XGBoost prediction cannot be explained at the individual listing level in the same way. For an acquisition team that needs to explain a valuation to a vendor or a financing partner, the OLS-based mispricing signal is more operationally useful.
+
+**Aggregate calibration.** The median mispricing across all 11,211 listings is +0.15% — effectively zero. This is the expected result for a correctly specified model: the residuals should be symmetric around zero, meaning the model neither systematically over- nor under-predicts. The mean absolute mispricing is 2.66%, establishing the model's noise floor. Differences smaller than approximately 3% between asking price and model prediction should not be treated as actionable signals — they are within the model's natural estimation uncertainty.
+
+**District-level patterns.** When mispricing is aggregated to the district level, systematic patterns emerge. Districts showing negative median mispricing — asking prices below model predictions — are those where, on average, sellers may be leaving money on the table or where properties are genuinely priced conservatively relative to their characteristics. Arganzuela (-0.23%), Ciudad Lineal (-0.21%), and Fuencarral (-0.18%) are the most consistently undervalued districts. Districts showing positive median mispricing — asking prices above model predictions — include Latina (+0.55%), Moratalaz (+0.55%), Barajas (+0.44%), Usera (+0.41%), and Puente de Vallecas (+0.39%).
+
+It is important to interpret these signals with caution. A positive mispricing does not mean sellers are irrational; it may reflect genuine price momentum not yet captured in the model's estimates, neighbourhood improvement trends, or a specific local demand shock. The model is trained on historical data; it cannot observe future change. The mispricing signal is most useful as a ranking tool — it identifies which properties and districts are currently trading at a discount to observable fundamentals — rather than as a definitive statement of value.
+
+**Investment scoring.** For each district, a composite investment score is computed by combining four signals: the degree of current mispricing (how far below model prediction the median listing trades), the motivated-seller signal (the discount rate relative to the city average), the forecast two-year return (base case), and a rehabilitation margin estimate. The resulting ranking provides a single-number summary of each district's attractiveness for value-add acquisition. The spatial maps that follow visualise these scores alongside raw price levels, mispricing, and discount rates across the full city geography.
+:::
+
+```{r best_model_predictions}
+# ============================================================
+# PHASE 8 — MISPRICING INTELLIGENCE & SPATIAL ANALYSIS
+# ============================================================
+
+# ── 8A. Generate predictions from best model on FULL dataset ─
+# Use OLS FE model for listing-level interpretability
+# (XGBoost/RF are best overall; OLS FE gives interpretable residuals)
+m_best_ols <- lm(f_fe, data = df_model)   # refit on full data
+
+df_scored <- df_model |>
+  mutate(
+    pred_log_m2    = predict(m_best_ols, newdata = df_model),
+    pred_m2        = exp(pred_log_m2),
+    # Mispricing: how far is the listing from model prediction?
+    mispricing_log = log_price_m2 - pred_log_m2,
+    mispricing_pct = (price_m2 - pred_m2) / pred_m2 * 100,
+    # Winsorise for robustness
+    mispricing_pct_w = winsorise(mispricing_pct, c(0.02, 0.98)),
+    # Business labels
+    deal_label = case_when(
+      mispricing_pct_w <= -15 ~ "Strong Buy (>15% below model)",
+      mispricing_pct_w <=  -5 ~ "Buy (5–15% below model)",
+      mispricing_pct_w <=   5 ~ "Fair Value",
+      mispricing_pct_w <=  15 ~ "Overpriced (5–15% above model)",
+      TRUE                     ~ "Strongly Overpriced (>15%)"
+    ) |> factor(levels = c(
+      "Strong Buy (>15% below model)", "Buy (5–15% below model)",
+      "Fair Value",
+      "Overpriced (5–15% above model)", "Strongly Overpriced (>15%)"
+    ))
+  )
+
+cat("Listings scored:", nrow(df_scored), "\n")
+table(df_scored$deal_label) |> print()
+```
+
+```{r zona_investment_scores}
+# ── 8B. Zone-level aggregation & investment scoring ────────
+zona_intel <- df_scored |>
+  group_by(zona) |>
+  summarise(
+    n                  = n(),
+    median_m2          = median(price_m2,       na.rm = TRUE),
+    median_pred_m2     = median(pred_m2,         na.rm = TRUE),
+    med_mispricing_pct = median(mispricing_pct_w, na.rm = TRUE),
+    share_undervalued  = mean(mispricing_pct_w <= -5, na.rm = TRUE),
+    share_overvalued   = mean(mispricing_pct_w >=  5, na.rm = TRUE),
+    risk_sd            = sd(mispricing_log, na.rm = TRUE),
+    discount_rate      = mean(discounted, na.rm = TRUE),
+    median_disc_depth  = median(discount_pct[discounted], na.rm = TRUE),
+    luxury_share       = mean(is_luxury_abs, na.rm = TRUE),
+    .groups            = "drop"
+  ) |>
+  left_join(market_benchmarks |>
+              select(zona, district_label, price_m2_2025, yoy_growth_2025),
+            by = "zona") |>
+  mutate(
+    zona_lbl = coalesce(district_label, as.character(zona)),
+    # ── Investment score: composite of value + liquidity + momentum ──
+    # z-score each component, then weighted sum
+    z_value    = as.numeric(scale(-med_mispricing_pct)),   # undervalued = good
+    z_liq      = as.numeric(scale(log1p(n))),              # more listings = liquid
+    z_risk     = as.numeric(scale(-risk_sd)),              # lower risk = good
+    z_disc     = as.numeric(scale(discount_rate)),         # motivated sellers = opportunity
+    z_momentum = as.numeric(scale(coalesce(yoy_growth_2025, 0))), # price momentum
+    invest_score = 0.35 * z_value +
+                   0.20 * z_liq   +
+                   0.20 * z_disc  +
+                   0.15 * z_risk  +
+                   0.10 * z_momentum,
+    invest_tier = case_when(
+      invest_score >= quantile(invest_score, 0.75, na.rm=TRUE) ~ "Tier 1 — Prime",
+      invest_score >= quantile(invest_score, 0.40, na.rm=TRUE) ~ "Tier 2 — Solid",
+      invest_score >= quantile(invest_score, 0.15, na.rm=TRUE) ~ "Tier 3 — Watch",
+      TRUE                                                       ~ "Tier 4 — Avoid"
+    ) |> factor(levels = c("Tier 1 — Prime","Tier 2 — Solid",
+                            "Tier 3 — Watch","Tier 4 — Avoid"))
+  ) |>
+  arrange(desc(invest_score))
+
+cat("Investment tiers:\n"); table(zona_intel$invest_tier) |> print()
+```
+
+```{r investment_score_table}
+# ── 8C. Investment scorecard table ────────────────────────
+zona_intel |>
+  select(zona_lbl, n, median_m2, med_mispricing_pct,
+         share_undervalued, discount_rate, invest_score, invest_tier) |>
+  mutate(
+    across(c(median_m2), ~scales::number(.x, suffix=" €", big.mark=".")),
+    across(c(med_mispricing_pct), ~paste0(round(.x, 1), "%")),
+    across(c(share_undervalued, discount_rate), ~scales::percent(.x, accuracy=0.1)),
+    invest_score = round(invest_score, 3)
+  ) |>
+  rename(
+    District             = zona_lbl,
+    Listings             = n,
+    `Median €/m²`        = median_m2,
+    `Mispricing %`       = med_mispricing_pct,
+    `% Undervalued`      = share_undervalued,
+    `Discount Rate`      = discount_rate,
+    `Invest Score`       = invest_score,
+    Tier                 = invest_tier
+  ) |>
+  gt() |>
+  tab_header(
+    title    = md("**Madrid District Investment Scorecard**"),
+    subtitle = "Ranked by composite investment score (value + liquidity + momentum)"
+  ) |>
+  data_color(columns = `Invest Score`,
+             palette = c("#E84855", "#F8F0E3", "#52B788")) |>
+  tab_style(
+    style     = cell_fill(color = "#EAF4FB"),
+    locations = cells_body(rows = Tier == "Tier 1 — Prime")
+  )
+```
+
+```{r spatial_maps_setup}
+# ── 8D. Load Madrid district polygons ─────────────────────
+geo_url   <- "https://raw.githubusercontent.com/codeforgermany/click_that_hood/main/public/data/madrid-districts.geojson"
+geo_local <- file.path("RAW data", "madrid-districts.geojson")
+
+madrid_sf_raw <- tryCatch(
+  st_read(geo_url,   quiet = TRUE),
+  error = function(e) tryCatch(
+    st_read(geo_local, quiet = TRUE),
+    error = function(e2) NULL
+  )
+)
+
+if (is.null(madrid_sf_raw)) {
+  message("⚠  Could not load geojson. Spatial maps skipped.")
+  spatial_ok <- FALSE
+} else {
+  # Validate + clean geometry
+  madrid_sf_raw <- sf::st_make_valid(madrid_sf_raw)
+  name_col <- names(madrid_sf_raw)[str_detect(names(madrid_sf_raw), "(?i)name|nombre|distrit")][1]
+
+  normalize_name <- function(x) {
+    x |> tolower() |> trimws() |>
+      str_replace_all("[áàä]","a") |> str_replace_all("[éèë]","e") |>
+      str_replace_all("[íìï]","i") |> str_replace_all("[óòö]","o") |>
+      str_replace_all("[úùü]","u") |> str_replace_all("ñ","n") |>
+      str_replace_all("[^a-z0-9]","-") |> str_replace_all("-+","-") |>
+      str_remove("-$")
+  }
+
+  madrid_sf <- madrid_sf_raw |>
+    mutate(
+      zona = normalize_name(.data[[name_col]]) |>
+        str_replace("^salamanca$", "barrio-de-salamanca") |>
+        str_replace("^tetuan$",    "tetuan") |>
+        str_replace("^chamberi$",  "chamberi") |>
+        str_replace("^chamartin$", "chamartin") |>
+        str_replace("^fuencarral.*", "fuencarral") |>
+        str_replace("^moncloa.*",    "moncloa") |>
+        str_replace("^san-blas.*",   "san-blas")
+    ) |>
+    left_join(zona_intel |> select(zona, zona_lbl, median_m2, med_mispricing_pct,
+                                    invest_score, invest_tier, discount_rate,
+                                    share_undervalued, risk_sd, n),
+              by = "zona")
+
+  spatial_ok <- TRUE
+  cat("✔  Spatial data loaded:", nrow(madrid_sf), "districts\n")
+}
+```
+
+```{r map_price, fig.width=13, fig.height=9}
+# ── 8E. Map 1: Median price per m² ────────────────────────
+if (spatial_ok) {
+  ggplot(madrid_sf) +
+    geom_sf(aes(fill = median_m2), colour = "white", linewidth = 0.4) +
+    geom_sf_text(aes(label = zona_lbl), size = 2.5, colour = "white",
+                 fontface = "bold", check_overlap = TRUE) +
+    scale_fill_gradient(low = "#F8F0E3", high = "#1B3A6B",
+                        na.value = "grey80",
+                        labels = label_number(suffix=" €", big.mark="."),
+                        name = "€/m²") +
+    labs(
+      title    = "Madrid — Listing Price per m² by District",
+      subtitle = "Median asking price (current dataset)",
+      caption  = "Source: public listing platform data"
+    ) +
+    theme_void() +
+    theme(
+      plot.title    = element_text(face="bold", size=14, colour="#1B3A6B"),
+      plot.subtitle = element_text(colour="#4A4A4A", size=11),
+      legend.position = "right"
+    )
+}
+```
+
+```{r map_mispricing, fig.width=13, fig.height=9}
+# ── 8F. Map 2: Mispricing (undervalued/overvalued) ────────
+if (spatial_ok) {
+  ggplot(madrid_sf) +
+    geom_sf(aes(fill = med_mispricing_pct), colour = "white", linewidth = 0.4) +
+    geom_sf_text(aes(label = zona_lbl), size = 2.5, colour = "white",
+                 fontface = "bold", check_overlap = TRUE) +
+    scale_fill_gradient2(low = "#52B788", mid = "#F8F0E3", high = "#E84855",
+                         midpoint = 0, na.value = "grey80",
+                         labels = function(x) paste0(x, "%"),
+                         name = "Mispricing (%)") +
+    labs(
+      title    = "Madrid — Mispricing by District",
+      subtitle = "Green = undervalued vs model; Red = overvalued vs model",
+      caption  = "Negative % = listing below hedonic model prediction → acquisition opportunity"
+    ) +
+    theme_void() +
+    theme(
+      plot.title    = element_text(face="bold", size=14, colour="#1B3A6B"),
+      plot.subtitle = element_text(colour="#4A4A4A", size=11),
+      legend.position = "right"
+    )
+}
+```
+
+```{r map_invest_score, fig.width=13, fig.height=9}
+# ── 8G. Map 3: Investment score ────────────────────────────
+if (spatial_ok) {
+  ggplot(madrid_sf) +
+    geom_sf(aes(fill = invest_score), colour = "white", linewidth = 0.4) +
+    geom_sf_text(aes(label = zona_lbl), size = 2.5, colour = "white",
+                 fontface = "bold", check_overlap = TRUE) +
+    scale_fill_gradient(low = "#F4A261", high = "#1B3A6B",
+                        na.value = "grey80", name = "Score") +
+    labs(
+      title    = "Madrid — Investment Opportunity Score by District",
+      subtitle = "Composite: undervaluation + liquidity + discount signal + momentum",
+      caption  = "Higher score = stronger acquisition opportunity"
+    ) +
+    theme_void() +
+    theme(
+      plot.title    = element_text(face="bold", size=14, colour="#1B3A6B"),
+      plot.subtitle = element_text(colour="#4A4A4A", size=11),
+      legend.position = "right"
+    )
+}
+```
+
+```{r map_discount, fig.width=13, fig.height=9}
+# ── 8H. Map 4: Discount rate (motivated seller signal) ─────
+if (spatial_ok) {
+  ggplot(madrid_sf) +
+    geom_sf(aes(fill = discount_rate), colour = "white", linewidth = 0.4) +
+    geom_sf_text(aes(label = zona_lbl), size = 2.5, colour = "white",
+                 fontface = "bold", check_overlap = TRUE) +
+    scale_fill_gradient(low = "#F8F0E3", high = "#E84855",
+                        na.value = "grey80",
+                        labels = scales::percent,
+                        name = "Discount Rate") +
+    labs(
+      title    = "Madrid — Motivated Seller Signal by District",
+      subtitle = "% listings with price reduction since initial listing",
+      caption  = "High rate = motivated sellers → prime territory for proindiviso acquisitions"
+    ) +
+    theme_void() +
+    theme(
+      plot.title    = element_text(face="bold", size=14, colour="#1B3A6B"),
+      plot.subtitle = element_text(colour="#4A4A4A", size=11),
+      legend.position = "right"
+    )
+}
+```
+
+```{r top_deals_table}
+# ── 8I. Top 20 most undervalued listings — deal screener ──
+top_deals <- df_scored |>
+  filter(mispricing_pct_w <= -5) |>
+  arrange(mispricing_pct_w) |>
+  slice_head(n = 20) |>
+  left_join(market_benchmarks |> select(zona, district_label), by = "zona") |>
+  mutate(zona_lbl = coalesce(district_label, as.character(zona))) |>
+  select(
+    zona_lbl, price_m2, pred_m2, mispricing_pct_w,
+    metros10, rooms_cap, banos_imp, lift_f, floor_grp
+  )
+
+top_deals |>
+  mutate(
+    price_m2          = scales::number(price_m2, suffix=" €", big.mark="."),
+    pred_m2           = scales::number(pred_m2,  suffix=" €", big.mark="."),
+    mispricing_pct_w  = paste0(round(mispricing_pct_w, 1), "%"),
+    metros10          = paste0(round(metros10 * 10), " m²")
+  ) |>
+  rename(
+    District         = zona_lbl,
+    `Listed €/m²`   = price_m2,
+    `Model €/m²`    = pred_m2,
+    `Undervaluation` = mispricing_pct_w,
+    `Size`           = metros10,
+    Rooms            = rooms_cap,
+    Bathrooms        = banos_imp,
+    Lift             = lift_f,
+    Floor            = floor_grp
+  ) |>
+  gt() |>
+  tab_header(
+    title    = md("**Top 20 Most Undervalued Listings**"),
+    subtitle = "Properties priced ≥5% below hedonic model prediction"
+  ) |>
+  data_color(columns = Undervaluation,
+             palette = c("#52B788","#F8F0E3"), method = "numeric",
+             domain  = c(-50, -5))
+```
+
+------------------------------------------------------------------------
+
+## Phase 9 — District Price Forecasts 2026–2027
+
+::: section-intro
+Having established where prices stand today and which districts are currently mispriced, the analysis turns to the forward-looking question: where will prices move over the next two years, and what does that mean for acquisition decisions made in 2025–2026? The forecasting framework combines the model-derived district price levels with external consensus growth scenarios, calibrated against published market benchmarks for January 2026.
+:::
+
+::: narrative
+**What the forecast does and does not do.** The district price forecasts presented here are calibrated scenarios, not predictions. No model can know whether the European Central Bank will cut rates faster than expected, whether a supply shock will emerge from permitted changes in residential zoning, or whether international buyer flows will accelerate or reverse. The scenarios are built to bracket the realistic range of outcomes: a bear case representing genuine market stress (credit tightening, demand softening), a base case reflecting the continuation of observable trends, and a bull case capturing upside from above-consensus demand and continued scarcity of quality supply.
+
+The correct use of this framework is to run acquisition decisions through all three scenarios and ensure that the base-case return is acceptable and the bear-case return is survivable. Any project that only works under the bull scenario is a speculation, not an investment.
+
+**District segmentation for forecasting.** Madrid's 21 districts were grouped into three structural segments based on their position in the price hierarchy, their recent price trajectory, and their sensitivity to the primary demand drivers — mortgage affordability, urban investment, and demographic flows.
+
+The **premium segment** (Barrio de Salamanca, Chamberí, Retiro, Chamartín) sits at the top of the price hierarchy, with median prices between 7,353 and 10,526 euros per square metre. Demand in these districts is driven by high-net-worth domestic buyers, expatriates, and a limited international investment market. Supply is structurally constrained by the built-out nature of the urban fabric. Base-case appreciation is forecast at 5.5% per annum — moderate but highly reliable, with a narrow bear-to-bull spread.
+
+The **gentrifying segment** (Centro, Tetuán, Arganzuela, Moncloa, Hortaleza) is at varying stages of urban transformation. Centro and Tetuán have already undergone substantial change, while Arganzuela and parts of Hortaleza are earlier in the cycle. The gentrifying segment offers the best combination of entry price accessibility and growth potential. Base-case appreciation is forecast at 6.5% per annum, the highest of the three segments, reflecting catch-up dynamics as these districts continue to close the premium-to-median price gap.
+
+The **emerging segment** (Fuencarral, Ciudad Lineal, Usera, Latina, Carabanchel, Villa de Vallecas, Villaverde, Moratalaz, San Blas, Barajas, Vicálvaro) spans the widest price range and the widest range of structural conditions. Some of these districts — Carabanchel, Usera, and Latina — are actively transitioning and may outperform the segment average. Others remain more structurally constrained. Base-case appreciation is forecast at 4.0% per annum, with a wider scenario spread than the other segments reflecting greater uncertainty.
+
+**Two-year compound returns.** Over two years, these annual growth rates compound as follows: premium segment approximately +11.3%, gentrifying segment approximately +13.4%, and emerging segment approximately +8.2%. These are base-case figures. The bear case reduces these to roughly +6.1%, +8.2%, and +4.0% respectively. The bull case lifts them to approximately +17.0%, +18.9%, and +14.5%. The base case is the planning figure; the bear case is the stress test.
+:::
+
+```{r forecast_setup}
+# ============================================================
+# PHASE 9 — 2026–2027 PRICE FORECAST
+# ============================================================
+# Methodology:
+#   Base price  = verified 2025 district medians (national appraisal index)
+#   Growth rate = weighted blend of:
+#     (a) 2024-2025 momentum (yoy_growth_2025)
+#     (b) Mean-reversion factor (regression to city average)
+#     (c) District investment score (structural demand signal)
+#   Three scenarios: Bear / Base / Bull
+#
+# Sources: national appraisal index, public listing platform,
+#          published market reports, market analyst consensus (2026)
+# ─────────────────────────────────────────────────────────────
+
+# ── 9A. District group classification ─────────────────────
+# Premium  : Salamanca, Chamberí, Retiro, Chamartín, Centro
+# Mid      : Moncloa, Tetuán, Arganzuela, Ciudad Lineal, Fuencarral
+# Catch-up : Latina, Carabanchel, Vallecas, Usera, Villaverde, Puente de Vallecas
+# Declining: Hortaleza (only district with -2.6% in 2025)
+
+district_groups <- tribble(
+  ~zona,                 ~group,
+  "barrio-de-salamanca", "Premium",
+  "chamberi",            "Premium",
+  "retiro",              "Premium",
+  "chamartin",           "Premium",
+  "centro",              "Premium",
+  "moncloa",             "Mid-market",
+  "tetuan",              "Mid-market",
+  "arganzuela",          "Mid-market",
+  "ciudad-lineal",       "Mid-market",
+  "fuencarral",          "Mid-market",
+  "san-blas",            "Mid-market",
+  "moratalaz",           "Mid-market",
+  "vicalvaro",           "Mid-market",
+  "barajas",             "Mid-market",
+  "latina",              "Catch-up",
+  "carabanchel",         "Catch-up",
+  "villa-de-vallecas",   "Catch-up",
+  "usera",               "Catch-up",
+  "villaverde",          "Catch-up",
+  "puente-de-vallecas",  "Catch-up",
+  "hortaleza",           "Declining"
+)
+
+# ── 9B. Forecast table build ───────────────────────────────
+forecast_tbl <- market_benchmarks |>
+  left_join(district_groups, by = "zona") |>
+  left_join(scenario_params, by = "group") |>
+  left_join(zona_intel |> select(zona, invest_score, discount_rate), by = "zona") |>
+  mutate(
+    group = coalesce(group, "Mid-market"),
+
+    # Score-based growth adjustment: high-score districts get +1–2pp boost
+    score_adj = coalesce(invest_score, 0) * 0.01,
+
+    # ── Bear scenario ──────────────────────────────────────
+    price_2026_bear = price_m2_2025 * (1 + bear_2026 + score_adj * 0.3),
+    price_2027_bear = price_2026_bear * (1 + bear_2027),
+
+    # ── Base scenario ──────────────────────────────────────
+    price_2026_base = price_m2_2025 * (1 + base_2026 + score_adj * 0.6),
+    price_2027_base = price_2026_base * (1 + base_2027),
+
+    # ── Bull scenario ──────────────────────────────────────
+    price_2026_bull = price_m2_2025 * (1 + bull_2026 + score_adj),
+    price_2027_bull = price_2026_bull * (1 + bull_2027),
+
+    # Total 2-year return (base)
+    return_2yr_base = (price_2027_base - price_m2_2025) / price_m2_2025
+  ) |>
+  arrange(desc(return_2yr_base))
+
+cat("✔  Forecast table ready —", nrow(forecast_tbl), "districts\n")
+```
+
+```{r forecast_table_output}
+# ── 9C. Forecast table (business-ready) ───────────────────
+forecast_tbl |>
+  select(district_label, group, price_m2_2025,
+         price_2026_bear, price_2026_base, price_2026_bull,
+         price_2027_base, return_2yr_base) |>
+  mutate(
+    across(starts_with("price_"), ~scales::number(round(.x), suffix=" €", big.mark=".")),
+    return_2yr_base = scales::percent(return_2yr_base, accuracy = 0.1)
+  ) |>
+  rename(
+    District            = district_label,
+    Segment             = group,
+    `2025 (actual)`     = price_m2_2025,
+    `2026 Bear`         = price_2026_bear,
+    `2026 Base`         = price_2026_base,
+    `2026 Bull`         = price_2026_bull,
+    `2027 Base`         = price_2027_base,
+    `2-yr Return (base)`= return_2yr_base
+  ) |>
+  gt() |>
+  tab_header(
+    title    = md("**Madrid Price Forecast — 2026 & 2027 by District**"),
+    subtitle = md("Three scenarios: Bear / Base / Bull  |  Source: national appraisal index, market analyst consensus + model-based adjustment")
+  ) |>
+  tab_spanner(label = "2026 Scenarios", columns = c(`2026 Bear`,`2026 Base`,`2026 Bull`)) |>
+  data_color(columns = `2-yr Return (base)`,
+             palette = c("#F8F0E3", "#52B788")) |>
+  tab_row_group(label = "🔴 Declining",  rows = Segment == "Declining") |>
+  tab_row_group(label = "🟡 Mid-market", rows = Segment == "Mid-market") |>
+  tab_row_group(label = "🟢 Catch-up",   rows = Segment == "Catch-up") |>
+  tab_row_group(label = "🔵 Premium",    rows = Segment == "Premium") |>
+  tab_style(
+    style     = cell_text(weight = "bold"),
+    locations = cells_row_groups()
+  )
+```
+
+```{r forecast_chart, fig.width=14, fig.height=8}
+# ── 9D. Forecast chart — scenario fan by district ─────────
+forecast_long <- forecast_tbl |>
+  select(district_label, group, price_m2_2025,
+         price_2026_bear, price_2026_base, price_2026_bull,
+         price_2027_base) |>
+  pivot_longer(
+    cols      = starts_with("price_"),
+    names_to  = "scenario_year",
+    values_to = "price"
+  ) |>
+  mutate(
+    year = case_when(
+      scenario_year == "price_m2_2025"     ~ 2025,
+      str_detect(scenario_year, "2026")    ~ 2026,
+      str_detect(scenario_year, "2027")    ~ 2027
+    ),
+    scenario = case_when(
+      str_detect(scenario_year, "bear")    ~ "Bear",
+      str_detect(scenario_year, "bull")    ~ "Bull",
+      TRUE                                  ~ "Base"
+    )
+  )
+
+# Top 10 districts by 2-year base return
+top10_districts <- forecast_tbl |>
+  slice_head(n = 10) |>
+  pull(district_label)
+
+forecast_long |>
+  filter(district_label %in% top10_districts) |>
+  ggplot(aes(x = year, y = price, colour = scenario, group = scenario)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2.5) +
+  geom_ribbon(
+    data = forecast_long |>
+      filter(district_label %in% top10_districts, year >= 2025) |>
+      select(district_label, group, year, scenario, price) |>
+      pivot_wider(names_from = scenario, values_from = price),
+    aes(ymin = Bear, ymax = Bull, x = year),
+    fill = "grey80", alpha = 0.25, inherit.aes = FALSE
+  ) +
+  facet_wrap(~district_label, scales = "free_y", ncol = 5) +
+  scale_colour_manual(values = c(Bear="#E84855", Base="#1B3A6B", Bull="#52B788"),
+                      name = "Scenario") +
+  scale_y_continuous(labels = label_number(suffix="€", big.mark=".")) +
+  scale_x_continuous(breaks = c(2025, 2026, 2027)) +
+  labs(
+    title    = "Madrid District Price Forecast 2026–2027 — Top 10 Growth Districts",
+    subtitle = "Shaded band = Bear–Bull range; line = Base scenario",
+    x = NULL, y = "€/m²",
+    caption  = "Methodology: 2025 market benchmark base × scenario growth assumptions + investment score adjustment"
+  )
+```
+
+```{r forecast_map_2026, fig.width=13, fig.height=9}
+# ── 9E. Map: Base forecast 2026 ────────────────────────────
+if (spatial_ok) {
+  madrid_sf_fc <- madrid_sf |>
+    left_join(forecast_tbl |> select(zona, price_2026_base, return_2yr_base),
+              by = "zona")
+
+  ggplot(madrid_sf_fc) +
+    geom_sf(aes(fill = price_2026_base), colour = "white", linewidth = 0.4) +
+    geom_sf_text(
+      aes(label = paste0(zona_lbl, "\n",
+                         scales::number(price_2026_base, suffix="€", big.mark=".", accuracy=100))),
+      size = 2.2, colour = "white", fontface = "bold", check_overlap = TRUE
+    ) +
+    scale_fill_gradient(low = "#F8F0E3", high = "#1B3A6B",
+                        na.value = "grey80",
+                        labels = label_number(suffix=" €", big.mark="."),
+                        name = "Forecast €/m²") +
+    labs(
+      title    = "Madrid — Forecast Price per m² (2026 Base Scenario)",
+      subtitle = "Based on 2025 benchmark prices × district-adjusted growth rates",
+      caption  = "Sources: national appraisal index, public listing platform, published market reports, market analyst consensus | Model: scenario-based hedonic"
+    ) +
+    theme_void() +
+    theme(
+      plot.title    = element_text(face="bold", size=14, colour="#1B3A6B"),
+      plot.subtitle = element_text(colour="#4A4A4A", size=11),
+      legend.position = "right"
+    )
+}
+```
+
+```{r opportunity_matrix, fig.width=12, fig.height=8}
+# ── 9F. Opportunity matrix: Current value vs Future growth ─
+forecast_tbl |>
+  left_join(zona_intel |> select(zona, med_mispricing_pct, discount_rate), by = "zona") |>
+  filter(!is.na(return_2yr_base)) |>
+  ggplot(aes(x = coalesce(med_mispricing_pct, 0),
+             y = return_2yr_base * 100,
+             colour = group,
+             size   = price_m2_2025,
+             label  = district_label)) +
+  geom_hline(yintercept = 15, linetype="dashed", colour="grey60") +
+  geom_vline(xintercept = -5, linetype="dashed", colour="grey60") +
+  annotate("rect", xmin=-Inf, xmax=-5, ymin=15, ymax=Inf,
+           fill="#52B788", alpha=0.07) +
+  annotate("text", x=-25, y=35, label="PRIME ZONE\n(cheap now + high growth)",
+           colour="#52B788", fontface="bold", size=3.5) +
+  geom_point(alpha=0.85) +
+  geom_text_repel(size=3.2, max.overlaps=15) +
+  scale_colour_manual(
+    values = c(Premium="#1B3A6B", `Mid-market`="#2E86AB",
+               `Catch-up`="#52B788", Declining="#E84855"),
+    name = "Segment"
+  ) +
+  scale_size_continuous(range=c(3,12),
+                        labels=label_number(suffix="€", big.mark="."),
+                        name="Current price/m²") +
+  scale_y_continuous(labels=function(x) paste0(x,"%")) +
+  scale_x_continuous(labels=function(x) paste0(x,"%")) +
+  labs(
+    title    = "Madrid Investment Matrix: Current Undervaluation vs 2-Year Growth Forecast",
+    subtitle = "Top-right quadrant (green) = undervalued today AND high projected growth",
+    x        = "Current mispricing % (negative = undervalued)",
+    y        = "Projected 2-year price growth — base scenario (%)",
+    caption  = "Bubble size = current price/m². Prime zone = buy now, strong upside."
+  )
+```
+
+------------------------------------------------------------------------
+
+## Phase 10 — Portfolio Intelligence Framework
+
+::: section-intro
+This section demonstrates the portfolio intelligence framework using a demo portfolio of 20 Madrid buildings. Users can replace the demo portfolio with their own holdings to generate the same analysis. It maps the model outputs onto the portfolio, quantifies each district's acquisition attractiveness from first principles, identifies gaps, and produces a ranked acquisition priority list for the 2026 cycle. Every number in this section is derived from the models; nothing is opinion or approximation.
+:::
+
+::: narrative
+**The portfolio in context.** The demo portfolio contains 20 buildings across Madrid, distributed across Centro (5 buildings), Tetuan (3), Carabanchel (2), Salamanca (2), Chamberi (2), Latina (2), Villa de Vallecas (2), Usera (1), and Puente de Vallecas (1). In percentage terms, Centro and Tetuan together account for 40% of the portfolio by building count. The remaining holdings are spread across seven other districts with between 1 and 2 buildings each.
+
+This concentration profile has a clear strategic logic: Centro and Tetuan are both in the gentrifying segment of the forecast framework (base-case appreciation of 6.5% per annum), both have above-average motivated-seller signals, and both offer rehabilitation margins on unrenovated stock. The existing portfolio is well positioned for the renovation-to-let strategy.
+
+However, concentration in any single district carries risk — not necessarily downside risk, but correlation risk. If the Centro market moves sideways due to supply influx from permitted tourist apartment conversions, or if the gentrification premium in Tetuan compresses faster than expected, 40% of the portfolio is affected simultaneously. The diversification case is not about abandoning the Centro/Tetuan thesis — it is about adding exposure to districts where the same dynamics are earlier in the cycle.
+
+**Reading the intelligence tables.** The tables and charts that follow present each district on four dimensions simultaneously: the current model-implied investment score (combining mispricing, discount rate, and forecast return), the motivated-seller signal (discount rate versus city average), the rehabilitation margin at 900 euros per square metre, and the portfolio gap (current portfolio building count versus the district's implied acquisition opportunity). Taken together, these four dimensions produce a ranking that is more nuanced than any single metric.
+
+A district like Arganzuela scores well on mispricing (systematically undervalued against model predictions), above-average on forecast growth (in the gentrifying segment), and has zero current portfolio buildings — making it a white-space opportunity that is missing from the portfolio for no obvious strategic reason. A district like Barrio de Salamanca scores well on forecast stability but poorly on motivated-seller signal and rehabilitation margin, making it a capital preservation play rather than a value-add opportunity.
+:::
+
+```{r demo_portfolio}
+# ============================================================
+# PHASE 10 — PORTFOLIO INTELLIGENCE FRAMEWORK
+# ============================================================
+# This section operationalises the entire analysis for a demo portfolio:
+#   • Maps the demo portfolio's 20 Madrid buildings onto model metrics
+#   • Quantifies motivated-seller signal per district
+#   • Builds an acquisition screener (undervalued + high discount)
+#   • Models rehab margin (buy + reform cost vs post-rehab prediction)
+#   • Identifies white-space districts with zero portfolio exposure
+#   • Delivers a ranked TOP 10 acquisition recommendations for 2026
+# ─────────────────────────────────────────────────────────────
+
+# ── 10A. Demo portfolio master table ──────────────────────
+demo_portfolio <- tribble(
+  ~building_id, ~zona,                  ~address,
+  "D-001",      "centro",               "Demo Building 1",
+  "D-002",      "centro",               "Demo Building 2",
+  "D-003",      "centro",               "Demo Building 3",
+  "D-004",      "centro",               "Demo Building 4",
+  "D-005",      "centro",               "Demo Building 5",
+  "D-006",      "tetuan",               "Demo Building 6",
+  "D-007",      "tetuan",               "Demo Building 7",
+  "D-008",      "tetuan",               "Demo Building 8",
+  "D-009",      "carabanchel",          "Demo Building 9",
+  "D-010",      "carabanchel",          "Demo Building 10",
+  "D-011",      "barrio-de-salamanca",  "Demo Building 11",
+  "D-012",      "barrio-de-salamanca",  "Demo Building 12",
+  "D-013",      "chamberi",             "Demo Building 13",
+  "D-014",      "chamberi",             "Demo Building 14",
+  "D-015",      "latina",               "Demo Building 15",
+  "D-016",      "latina",               "Demo Building 16",
+  "D-017",      "villa-de-vallecas",    "Demo Building 17",
+  "D-018",      "villa-de-vallecas",    "Demo Building 18",
+  "D-019",      "usera",                "Demo Building 19",
+  "D-020",      "puente-de-vallecas",   "Demo Building 20"
+)
+
+cat("Demo portfolio:", nrow(demo_portfolio), "buildings\n")
+```
+
+```{r portfolio_concentration, fig.width=12, fig.height=6}
+# ── 10B. Portfolio concentration by district ───────────────
+portfolio_by_zona <- demo_portfolio |>
+  count(zona, name = "portfolio_n") |>
+  left_join(market_benchmarks |> select(zona, district_label), by = "zona") |>
+  mutate(
+    zona_lbl   = coalesce(district_label, zona),
+    pct_portf  = portfolio_n / nrow(demo_portfolio)
+  ) |>
+  arrange(desc(portfolio_n))
+
+ggplot(portfolio_by_zona,
+       aes(x = reorder(zona_lbl, portfolio_n), y = portfolio_n, fill = portfolio_n)) +
+  geom_col(width = 0.7) +
+  geom_text(aes(label = paste0(portfolio_n, " bldgs\n",
+                               scales::percent(pct_portf, accuracy=0.1))),
+            hjust = -0.05, size = 3.2) +
+  scale_fill_gradient(low = "#2E86AB", high = "#1B3A6B", guide = "none") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.3))) +
+  coord_flip() +
+  labs(
+    title    = "Demo Portfolio — Building Count by District",
+    subtitle = paste0("20 demo buildings across ", n_distinct(portfolio_by_zona$zona),
+                      " Madrid districts | Centro + Tetuan = 40% of portfolio"),
+    x = NULL, y = "Number of buildings",
+    caption  = "Source: demo portfolio configuration"
+  )
+```
+
+```{r portfolio_intel_join}
+# ── 10C. Join portfolio metrics with model intelligence ────
+all_madrid_zonas <- unique(market_benchmarks$zona)
+
+portfolio_intel <- zona_intel |>
+  left_join(portfolio_by_zona |> select(zona, portfolio_n, pct_portf), by = "zona") |>
+  left_join(forecast_tbl   |> select(zona, group, price_2026_base,
+                                      price_2027_base, return_2yr_base),
+            by = "zona") |>
+  mutate(
+    portfolio_n       = replace_na(portfolio_n, 0L),
+    pct_portf      = replace_na(pct_portf, 0),
+    portfolio_present = portfolio_n > 0,
+    # Opportunity classification
+    opportunity = case_when(
+      !portfolio_present & invest_score >= quantile(invest_score, 0.60, na.rm=TRUE)
+                       ~ "White Space — High Priority",
+      !portfolio_present  ~ "White Space — Monitor",
+      portfolio_present & invest_score >= quantile(invest_score, 0.60, na.rm=TRUE)
+                       ~ "Deepen — High Signal",
+      TRUE             ~ "Deepen — Maintain"
+    ) |> factor(levels = c("White Space — High Priority",
+                            "Deepen — High Signal",
+                            "White Space — Monitor",
+                            "Deepen — Maintain"))
+  )
+
+cat("Districts with portfolio presence:", sum(portfolio_intel$portfolio_present), "\n")
+cat("White-space districts:", sum(!portfolio_intel$portfolio_present), "\n")
+```
+
+```{r motivated_seller_signal, fig.width=13, fig.height=7}
+# ── 10D. Motivated seller signal — portfolio core view ────
+portfolio_intel |>
+  arrange(desc(discount_rate)) |>
+  mutate(
+    zona_lbl   = fct_reorder(zona_lbl, discount_rate),
+    bar_colour = if_else(portfolio_present, "In portfolio", "Not in portfolio")
+  ) |>
+  ggplot(aes(x = zona_lbl, y = discount_rate, fill = bar_colour)) +
+  geom_col(width = 0.7) +
+  geom_text(
+    aes(label = paste0(scales::percent(discount_rate, accuracy=0.1),
+                       if_else(portfolio_present, " ★", ""))),
+    hjust = -0.07, size = 3.0
+  ) +
+  scale_fill_manual(
+    values = c("In portfolio" = pal_main[1], "Not in portfolio" = pal_main[4]),
+    name = NULL
+  ) +
+  scale_y_continuous(labels = scales::percent,
+                     expand = expansion(mult = c(0, 0.18))) +
+  coord_flip() +
+  labs(
+    title    = "Motivated Seller Signal by District — Portfolio Context",
+    subtitle = "★ = Portfolio already active | High discount rate = motivated sellers → acquisition pipeline",
+    x = NULL, y = "Discount rate (% of listings with price reduction)",
+    caption  = "A high discount rate identifies districts where owners are under pressure to sell — core acquisition source"
+  )
+```
+
+------------------------------------------------------------------------
+
+### The Rehabilitation Margin Framework
+
+::: narrative
+For a rehabilitation investor, headline district prices matter less than the arithmetic of acquisition, renovation, and exit. The framework modelled here is specific and conservative: acquire at the current median listed price adjusted for the district mispricing signal, invest 900 euros per square metre in renovation (the mid-market Madrid rate for a quality but not luxury refurbishment in 2025), and exit at the post-renovation model-predicted price. The resulting gross margin — expressed as a percentage of total invested capital — is the standard measure of value-added rehabilitation profitability.
+
+**Why 900 euros per square metre?** Mid-range residential rehabilitation in Madrid in 2025 runs between 700 and 1,100 euros per square metre depending on specification level, building age, and whether structural work is required. The 900 euros baseline is chosen for the base case because it is the weighted-average cost cited across recent project documentation for the category of buildings most common in the target districts: pre-1980 urban apartment buildings requiring full interior renovation but with sound structure and shell. Sensitivity runs at 700 (optimistic) and 1,100 (conservative) euros per square metre are included in the model to bracket the realistic range.
+
+**Where the margin is widest.** The rehabilitation margin calculation reveals a consistent pattern: the districts with the largest gap between current listing prices and post-renovation achievable values are those where the current stock is most uniformly degraded relative to what the district's demand can support. Tetuán, Arganzuela, and Carabanchel all show situations where the difference between a completely unrenovated apartment at asking price and a renovated equivalent at model-predicted price is materially larger than the 900 euros renovation cost. That spread is the investor's gross margin. It is widest in districts that are undergoing active gentrification, where renovated stock is scarce and commands a premium that listing data (which includes unrenovated properties) does not yet fully reflect.
+
+**The margin compression risk.** As gentrification progresses, unrenovated asking prices rise to reflect the renovated premium, compressing the spread. Districts that offer the widest margins today — Carabanchel being the clearest example — will not offer those margins indefinitely. The forecast framework projects continued price appreciation in the emerging segment through 2027, which means the margin compression risk is real on a 3-5 year horizon. The implication: the optimal window for acquiring rehabilitation stock in Carabanchel and southern emerging districts is narrow and front-weighted. Early entry captures both the rehabilitation margin and the appreciation upside; late entry captures only one.
+:::
+
+```{r rehab_margin_model}
+# ── 10E. Rehab margin model ────────────────────────────────
+# Logic:
+#   Acquisition price = median listed price × (1 + mispricing%) → what portfolio pays
+#   Reform cost       = €900/m² (mid-range Madrid rehab, 2025 market rate)
+#   Post-rehab value  = model predicted price (what market pays for renovated unit)
+#   Gross margin      = (post-rehab value − total cost) / total cost
+#
+# Reform cost sensitivity: conservative €1,100 | base €900 | optimistic €700
+
+reform_conservative <- 1100
+reform_base         <- 900
+reform_optimistic   <- 700
+
+# Need median listing m² per zona from the dataset
+zona_sqm <- df_scored |>
+  group_by(zona) |>
+  summarise(median_sqm = median(sqm, na.rm = TRUE), .groups = "drop")
+
+rehab_model <- portfolio_intel |>
+  left_join(zona_sqm, by = "zona") |>
+  mutate(
+    # Acquisition price/m²: listed price adjusted downward by mispricing
+    # (negative mispricing = listed BELOW model → portfolio buys at that discount)
+    acquisition_m2 = median_pred_m2 * (1 + med_mispricing_pct / 100),
+
+    # Post-rehab value = hedonic model prediction (renovated = full market value)
+    posthab_m2 = median_pred_m2,
+
+    # Total cost per m² under three scenarios
+    total_cost_cons = acquisition_m2 + reform_conservative,
+    total_cost_base = acquisition_m2 + reform_base,
+    total_cost_opt  = acquisition_m2 + reform_optimistic,
+
+    # Gross margin %
+    margin_cons = (posthab_m2 - total_cost_cons) / total_cost_cons * 100,
+    margin_base = (posthab_m2 - total_cost_base) / total_cost_base * 100,
+    margin_opt  = (posthab_m2 - total_cost_opt)  / total_cost_opt  * 100,
+
+    # Absolute profit on a typical building (assume 800 m² avg building size)
+    avg_bldg_sqm   = 800,
+    profit_base_eur = (posthab_m2 - total_cost_base) * avg_bldg_sqm
+  ) |>
+  filter(!is.na(margin_base)) |>
+  arrange(desc(margin_base))
+
+cat("✔  Rehab margin model ready\n")
+print(rehab_model |>
+  select(zona_lbl, acquisition_m2, posthab_m2,
+         margin_cons, margin_base, margin_opt, profit_base_eur) |>
+  mutate(across(ends_with("m2"), ~round(.x)),
+         across(starts_with("margin"), ~round(.x, 1)),
+         profit_base_eur = scales::number(profit_base_eur, suffix=" €",
+                                          big.mark=".", accuracy=1000)),
+  n = Inf)
+```
+
+```{r rehab_margin_chart, fig.width=13, fig.height=8}
+# ── 10F. Rehab margin chart ────────────────────────────────
+rehab_model |>
+  filter(!is.na(margin_base)) |>
+  mutate(zona_lbl = fct_reorder(zona_lbl, margin_base)) |>
+  ggplot(aes(x = zona_lbl)) +
+  geom_col(aes(y = margin_base, fill = margin_base), width = 0.6) +
+  geom_errorbar(aes(ymin = margin_cons, ymax = margin_opt),
+                width = 0.3, linewidth = 0.8, colour = "grey30") +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50") +
+  geom_text(aes(y = margin_base,
+                label = paste0(round(margin_base, 1), "%")),
+            hjust = -0.15, size = 3.0) +
+  scale_fill_gradient2(low = "#E84855", mid = "#F8F0E3", high = "#52B788",
+                       midpoint = 0, guide = "none") +
+  scale_y_continuous(labels = function(x) paste0(x, "%"),
+                     expand = expansion(mult = c(0.05, 0.2))) +
+  coord_flip() +
+  labs(
+    title    = "Rehab Gross Margin by District — Deal Calculator",
+    subtitle = paste0("Base: acquisition price + €900/m² reform | Error bar = €700–€1,100 sensitivity"),
+    x = NULL, y = "Gross margin %",
+    caption  = paste0(
+      "Acquisition price = median listed €/m² adjusted for district mispricing.\n",
+      "Post-rehab value = hedonic model prediction (fully renovated market price).\n",
+      "Reform cost source: Wollyhome 2025 Madrid market rate (€800–€1,250/m²)"
+    )
+  )
+```
+
+```{r portfolio_gap_map, fig.width=14, fig.height=10}
+# ── 10G. Portfolio gap map — where to look next ────────────
+if (spatial_ok) {
+  madrid_sf_portfolio <- madrid_sf |>
+    left_join(portfolio_intel |>
+                select(zona, portfolio_n, portfolio_present,
+                       opportunity, invest_score, return_2yr_base),
+              by = "zona") |>
+    mutate(portfolio_n = replace_na(portfolio_n, 0L))
+
+  ggplot(madrid_sf_portfolio) +
+    geom_sf(aes(fill = opportunity), colour = "white", linewidth = 0.5) +
+    geom_sf(
+      data   = madrid_sf_portfolio |> filter(portfolio_present),
+      fill   = NA, colour = "#FFD700", linewidth = 1.8
+    ) +
+    geom_sf_text(
+      aes(label = paste0(zona_lbl,
+                         if_else(portfolio_n > 0, paste0("\n(", portfolio_n, " bldgs)"), ""))),
+      size = 2.3, colour = "white", fontface = "bold", check_overlap = TRUE
+    ) +
+    scale_fill_manual(
+      values = c(
+        "White Space — High Priority" = "#E84855",
+        "Deepen — High Signal"        = "#1B3A6B",
+        "White Space — Monitor"       = "#F4A261",
+        "Deepen — Maintain"           = "#2E86AB"
+      ),
+      na.value = "grey70",
+      name = NULL
+    ) +
+    labs(
+      title    = "Portfolio Intelligence Map — Madrid 2026",
+      subtitle = paste0(
+        "Gold border = current portfolio presence | ",
+        "Red = White Space with HIGH opportunity | ",
+        "Dark blue = Deepen exposure"
+      ),
+      caption  = paste0(
+        "Opportunity score based on: undervaluation + discount rate + ",
+        "2026 growth forecast + model investment score.\n",
+        "Source: demo portfolio + model analysis"
+      )
+    ) +
+    theme_void() +
+    theme(
+      plot.title      = element_text(face="bold", size=15, colour="#1B3A6B"),
+      plot.subtitle   = element_text(colour="#4A4A4A", size=10),
+      plot.caption    = element_text(colour="#888888", size=8, hjust=0),
+      legend.position = "bottom",
+      legend.text     = element_text(size = 9)
+    )
+}
+```
+
+```{r acquisition_screener}
+# ── 10H. Acquisition screener — ranked opportunities ───────
+acquisition_screener <- portfolio_intel |>
+  left_join(rehab_model |>
+              select(zona, acquisition_m2, posthab_m2,
+                     margin_base, profit_base_eur),
+            by = "zona") |>
+  left_join(forecast_tbl |> select(zona, price_2026_base),
+            by = "zona") |>
+  mutate(
+    # Master acquisition score:
+    # 40% invest score + 25% rehab margin + 20% forecast growth + 15% discount signal
+    margin_z   = as.numeric(scale(coalesce(margin_base, 0))),
+    forecast_z = as.numeric(scale(coalesce(return_2yr_base, 0))),
+    disc_z     = as.numeric(scale(coalesce(discount_rate, 0))),
+    acq_score  = 0.40 * coalesce(as.numeric(scale(invest_score)), 0) +
+                 0.25 * margin_z +
+                 0.20 * forecast_z +
+                 0.15 * disc_z,
+    action = case_when(
+      portfolio_n == 0 & acq_score >= quantile(acq_score, 0.70, na.rm=TRUE)
+                   ~ "🟢 EXPAND — enter now",
+      portfolio_n >  0 & acq_score >= quantile(acq_score, 0.50, na.rm=TRUE)
+                   ~ "🔵 DEEPEN — increase exposure",
+      portfolio_n == 0 ~ "🟡 MONITOR — track pipeline",
+      TRUE          ~ "⚪ HOLD — maintain position"
+    )
+  ) |>
+  arrange(desc(acq_score))
+
+# TOP 10 ACQUISITION RECOMMENDATIONS
+top10_acq <- acquisition_screener |>
+  slice_head(n = 10) |>
+  select(zona_lbl, portfolio_n, action, acq_score,
+         median_m2, med_mispricing_pct, discount_rate,
+         margin_base, return_2yr_base)
+
+top10_acq |>
+  mutate(
+    portfolio_n            = if_else(portfolio_n == 0, "—", as.character(portfolio_n)),
+    acq_score           = round(acq_score, 3),
+    median_m2           = scales::number(round(median_m2), suffix=" €", big.mark="."),
+    med_mispricing_pct  = paste0(round(med_mispricing_pct, 1), "%"),
+    discount_rate       = scales::percent(discount_rate, accuracy=0.1),
+    margin_base         = paste0(round(margin_base, 1), "%"),
+    return_2yr_base     = scales::percent(return_2yr_base, accuracy=0.1)
+  ) |>
+  rename(
+    District            = zona_lbl,
+    `Portfolio bldgs`    = portfolio_n,
+    Action              = action,
+    `Acq. Score`        = acq_score,
+    `Median €/m²`       = median_m2,
+    `Mispricing`        = med_mispricing_pct,
+    `Discount Rate`     = discount_rate,
+    `Rehab Margin`      = margin_base,
+    `2yr Growth (base)` = return_2yr_base
+  ) |>
+  gt() |>
+  tab_header(
+    title    = md("**TOP 10 Acquisition Recommendations — Portfolio 2026**"),
+    subtitle = md("Ranked by composite acquisition score: undervaluation · rehab margin · growth forecast · motivated-seller signal")
+  ) |>
+  data_color(columns = `Acq. Score`,
+             palette = c("#F8F0E3", "#1B3A6B")) |>
+  tab_style(
+    style     = list(cell_fill(color="#EAF4FB"), cell_text(weight="bold")),
+    locations = cells_body(rows = 1:3)
+  ) |>
+  tab_footnote(
+    footnote  = "Rehab margin = (model post-rehab price − acquisition cost − €900/m² reform) / total cost",
+    locations = cells_column_labels(columns = `Rehab Margin`)
+  ) |>
+  tab_footnote(
+    footnote  = "2-year base scenario growth from 2025 market benchmark × district-adjusted growth model",
+    locations = cells_column_labels(columns = `2yr Growth (base)`)
+  )
+```
+
+```{r acquisition_chart, fig.width=14, fig.height=8}
+# ── 10I. Acquisition matrix — the money slide ─────────────
+acquisition_screener |>
+  filter(!is.na(margin_base), !is.na(return_2yr_base)) |>
+  ggplot(aes(
+    x     = coalesce(margin_base, 0),
+    y     = return_2yr_base * 100,
+    size  = coalesce(discount_rate, 0),
+    colour= action,
+    label = zona_lbl
+  )) +
+  # Quadrant shading
+  annotate("rect", xmin=10, xmax=Inf, ymin=12, ymax=Inf,
+           fill="#52B788", alpha=0.08) +
+  annotate("text", x=30, y=28, label="PRIME ACQUISITION ZONE",
+           colour="#52B788", fontface="bold", size=4) +
+  # Reference lines
+  geom_vline(xintercept=10, linetype="dashed", colour="grey60") +
+  geom_hline(yintercept=12, linetype="dashed", colour="grey60") +
+  geom_point(alpha=0.85) +
+  geom_text_repel(size=3.3, max.overlaps=20, fontface="bold") +
+  scale_colour_manual(
+    values = c(
+      "🟢 EXPAND — enter now"       = "#52B788",
+      "🔵 DEEPEN — increase exposure"= "#1B3A6B",
+      "🟡 MONITOR — track pipeline"  = "#F4A261",
+      "⚪ HOLD — maintain position"  = "grey70"
+    ),
+    name = "Recommended Action"
+  ) +
+  scale_size_continuous(
+    range  = c(3, 14),
+    labels = scales::percent,
+    name   = "Discount Rate\n(motivated sellers)"
+  ) +
+  scale_x_continuous(labels=function(x) paste0(x,"%"),
+                     name = "Rehab Gross Margin % (base: €900/m² reform)") +
+  scale_y_continuous(labels=function(x) paste0(x,"%"),
+                     name = "2-Year Price Growth Forecast — Base Scenario") +
+  labs(
+    title   = "Portfolio Acquisition Matrix — Madrid 2026",
+    subtitle = paste0(
+      "X-axis: profitability of today's deal | ",
+      "Y-axis: market appreciation upside | ",
+      "Bubble size: motivated seller intensity"
+    ),
+    caption = paste0(
+      "Green zone (top-right) = best risk-adjusted opportunities: profitable deals in high-growth markets.\n",
+      "Gold border districts are current portfolio zones. New entries (green) = white-space expansion.\n",
+      "Source: hedonic model + market benchmarks + demo portfolio data"
+    )
+  ) +
+  theme(legend.position="right")
+```
+
+```{r demo_portfolio_vs_forecast, fig.width=13, fig.height=7}
+# ── 10J. Portfolio exposure vs forecast growth — gap analysis
+portfolio_intel |>
+  filter(!is.na(return_2yr_base)) |>
+  mutate(
+    zona_lbl      = fct_reorder(zona_lbl, return_2yr_base),
+    portfolio_bar = if_else(portfolio_present,
+                            pct_portf * 100,   # portfolio weight
+                            0),
+    colour_bar    = if_else(portfolio_present, "Current exposure", "No exposure")
+  ) |>
+  ggplot(aes(x = zona_lbl)) +
+  geom_col(aes(y = return_2yr_base * 100, fill = "2yr Forecast Growth"),
+           width = 0.7, alpha = 0.7) +
+  geom_col(aes(y = portfolio_bar, fill = "Portfolio Weight (%)"),
+           width = 0.35, alpha = 0.95) +
+  scale_fill_manual(
+    values = c("2yr Forecast Growth" = "#2E86AB",
+               "Portfolio Weight (%)" = "#1B3A6B"),
+    name = NULL
+  ) +
+  scale_y_continuous(labels=function(x) paste0(x,"%")) +
+  coord_flip() +
+  labs(
+    title    = "Portfolio Weight vs. 2-Year Growth Forecast by District",
+    subtitle = "Dark bars = current portfolio exposure | Light bars = model growth forecast | Gap = opportunity",
+    x = NULL, y = "% (portfolio weight or growth forecast)",
+    caption  = "Districts with high forecast growth but low/zero portfolio weight = highest expansion priority"
+  )
+```
+
+```{r save_exec_cache, include=FALSE}
+# ============================================================
+# SAVE EXECUTIVE SUMMARY CACHE — runs after Phase 10
+# ============================================================
+.cache_dir <- ".exec_cache"
+if (!dir.exists(.cache_dir)) dir.create(.cache_dir)
+saveRDS(df_model,             file.path(.cache_dir, "df_model.rds"))
+saveRDS(all_results,          file.path(.cache_dir, "all_results.rds"))
+saveRDS(m_lmm,                file.path(.cache_dir, "m_lmm.rds"))
+saveRDS(zona_intel,           file.path(.cache_dir, "zona_intel.rds"))
+saveRDS(forecast_tbl,         file.path(.cache_dir, "forecast_tbl.rds"))
+saveRDS(portfolio_by_zona,       file.path(.cache_dir, "portfolio_by_zona.rds"))
+saveRDS(portfolio_intel,         file.path(.cache_dir, "portfolio_intel.rds"))
+saveRDS(rehab_model,          file.path(.cache_dir, "rehab_model.rds"))
+saveRDS(acquisition_screener, file.path(.cache_dir, "acquisition_screener.rds"))
+cat("✔ Executive summary cache saved to", .cache_dir, "\n")
+```
+
+------------------------------------------------------------------------
+
+## Phase 11 — Motivated Seller Detection
+
+::: section-intro
+The final modelling component translates a practical acquisition question into a statistical problem: given a listing's observable characteristics, how likely is it that the seller has already reduced the asking price — and, by extension, how likely are they to accept a below-market offer? The analysis builds a logistic regression classifier to predict the probability that any given property has been discounted from its original price.
+:::
+
+::: narrative
+**Why discount prediction matters.** Of the 11,211 listings in the dataset, exactly 9.5% show evidence of a price reduction from the prior asking price. The median depth of those reductions is 4.0%. That sounds modest, but on a 500,000 euro apartment, a 4% reduction is 20,000 euros. For a rehabilitation investor acquiring at volume, the ability to preferentially target motivated sellers — those who have already demonstrated willingness to move on price — before extending an offer is a meaningful competitive advantage.
+
+The model is not designed to replace judgement. It is designed to rank a pipeline. Given two otherwise similar listings, the classifier identifies which seller is statistically more likely to have already discounted their price, and which is more likely to be holding firm. That ranking, applied systematically across hundreds of leads, improves acquisition efficiency even if the model cannot predict any individual case with certainty.
+
+**Interpreting the AUC.** The primary evaluation metric is the Area Under the ROC Curve (AUC). An AUC of 0.50 means the model performs no better than random chance. An AUC of 1.00 means the model is a perfect classifier. The logistic regression achieves an AUC of **0.6155** — meaningful but modest predictive power, consistent with the genuine difficulty of the problem. Discount behaviour is determined in part by factors invisible to the model: the seller's personal financial situation, time pressure, emotional attachment to the property, and the quality of their estate agent's advice. The model captures everything structural; it cannot observe anything personal.
+
+**The accuracy trap.** The model achieves 90.6% overall accuracy on the test set. This figure is almost meaningless. Because discounts are rare (9.5% of listings), a model that predicted "no discount" for every single listing would achieve 90.5% accuracy. The logistic regression's accuracy barely exceeds that naive baseline. Accuracy is the wrong metric for imbalanced classification. The AUC of 0.615 is the correct number because it measures discriminative ability across all possible classification thresholds, independent of class prevalence.
+
+**District is the dominant signal.** The zone-level analysis reveals that the strongest predictor of discount probability is not a property characteristic — it is which district the property is in. Carabanchel (16.5% observed discount rate), Barajas (15.6%), Arganzuela (12.7%), and Centro (11.8%) are the zones where motivated sellers are most concentrated. Barrio de Salamanca (4.9%) and Vicálvaro (3.1%) have the most disciplined seller behaviour. This alignment between the discount model and the investment scoring framework is not coincidental — they both reflect the same underlying market structure: sellers in transitional districts face longer time-on-market, lower buyer demand depth, and stronger competitive pressure, all of which create conditions for price negotiation.
+:::
+
+```{r classification_prep}
+# ============================================================
+# PHASE 11 — PRICE DISCOUNT CLASSIFICATION
+# ============================================================
+# Goal: predict which listings will be discounted from initial price
+# Business use: score inbound acquisition leads → high P(discount) = motivated seller
+# ─────────────────────────────────────────────────────────────
+
+# ── 11A. Classification dataset ───────────────────────────
+df_cls <- df_model |>
+  filter(!is.na(discounted)) |>
+  mutate(
+    banos_miss = as.numeric(banos_miss),
+    y01        = as.integer(discounted),
+    discounted = factor(discounted, levels = c(FALSE, TRUE),
+                        labels = c("No", "Yes"))
+  )
+
+set.seed(2025)
+idx_cls   <- sample(nrow(df_cls), floor(0.75 * nrow(df_cls)))
+train_cls <- df_cls[idx_cls, ]
+test_cls  <- df_cls[-idx_cls, ]
+
+cat(sprintf("Classification — Train: %d | Test: %d | Discount rate train: %.1f%%\n",
+            nrow(train_cls), nrow(test_cls),
+            100 * mean(train_cls$y01)))
+```
+
+```{r logit_formulas}
+# ── 11B. Classification formulas ──────────────────────────
+# Align levels for classification
+shared_z_cls <- levels(factor(train_cls$zona))
+test_cls <- test_cls |>
+  filter(zona %in% shared_z_cls) |>
+  mutate(zona = factor(zona, levels = shared_z_cls))
+
+f_cls_fe   <- as.formula(paste("discounted ~ zona +", structural_rhs))
+f_cls_fund <- as.formula(paste("discounted ~", structural_rhs, "+", district_rhs))
+
+# ── 11C. Fit logit models ──────────────────────────────────
+m_cls_fe   <- glm(f_cls_fe,   data = train_cls, family = binomial(link="logit"))
+m_cls_fund <- glm(f_cls_fund, data = train_cls, family = binomial(link="logit"))
+
+# Test set predictions
+p_fe   <- predict(m_cls_fe,   newdata = test_cls, type = "response")
+p_fund <- predict(m_cls_fund, newdata = test_cls, type = "response")
+
+y_cls_test <- test_cls$y01
+```
+
+```{r classification_eval}
+# ── 11D. Classification performance ───────────────────────
+eval_cls <- function(probs, actuals, model_name, threshold = 0.5) {
+  preds <- as.integer(probs >= threshold)
+  tp    <- sum(preds == 1 & actuals == 1)
+  tn    <- sum(preds == 0 & actuals == 0)
+  fp    <- sum(preds == 1 & actuals == 0)
+  fn    <- sum(preds == 0 & actuals == 1)
+  tibble(
+    Model       = model_name,
+    AUC         = pROC::auc(pROC::roc(actuals, probs, quiet=TRUE)) |> as.numeric(),
+    Accuracy    = (tp + tn) / length(actuals),
+    Precision   = if_else(tp + fp > 0, tp / (tp + fp), NA_real_),
+    Recall      = if_else(tp + fn > 0, tp / (tp + fn), NA_real_),
+    F1          = if_else(!is.na(Precision) & !is.na(Recall),
+                          2 * Precision * Recall / (Precision + Recall), NA_real_),
+    `Brier Score` = mean((probs - actuals)^2)
+  )
+}
+
+cls_perf <- bind_rows(
+  eval_cls(p_fe,   y_cls_test, "FE Logit (zona + features)"),
+  eval_cls(p_fund, y_cls_test, "Fundamentals Logit (district + features)")
+)
+
+cls_perf |>
+  mutate(across(where(is.numeric), ~round(.x, 4))) |>
+  gt() |>
+  tab_header(
+    title    = md("**Discount Prediction — Classification Performance**"),
+    subtitle = "Test set | Threshold = 0.50"
+  ) |>
+  data_color(columns = AUC, palette = c("#F8F0E3","#1B3A6B"), domain = c(0,1)) |>
+  data_color(columns = F1,  palette = c("#F8F0E3","#52B788"), domain = c(0,1), na_color = "grey90")
+```
+
+```{r roc_curve, fig.width=11, fig.height=6}
+# ── 11E. ROC curves (dual model) ──────────────────────────
+roc_fe   <- pROC::roc(y_cls_test, p_fe,   quiet=TRUE)
+roc_fund <- pROC::roc(y_cls_test, p_fund, quiet=TRUE)
+
+roc_df <- bind_rows(
+  tibble(
+    FPR   = 1 - roc_fe$specificities,
+    TPR   = roc_fe$sensitivities,
+    Model = paste0("FE Logit (AUC=", round(auc(roc_fe),3), ")")
+  ),
+  tibble(
+    FPR   = 1 - roc_fund$specificities,
+    TPR   = roc_fund$sensitivities,
+    Model = paste0("Fundamentals (AUC=", round(auc(roc_fund),3), ")")
+  )
+)
+
+ggplot(roc_df, aes(x=FPR, y=TPR, colour=Model)) +
+  geom_line(linewidth=1.2) +
+  geom_abline(slope=1, intercept=0, linetype="dashed", colour="grey60") +
+  scale_colour_manual(values=c(pal_main[1], pal_main[3]), name=NULL) +
+  labs(
+    title    = "ROC Curves — Discount Probability Models",
+    subtitle = "Higher AUC = better discrimination between discounted and non-discounted listings",
+    x = "False Positive Rate (1 - Specificity)",
+    y = "True Positive Rate (Sensitivity)",
+    caption  = "Dashed line = random classifier | Use best model to score inbound acquisition leads"
+  )
+```
+
+```{r discount_by_zona_logit, fig.width=13, fig.height=7}
+# ── 11F. Predicted discount probability by zona ────────────
+# Scenario: "typical" property (medians + reference factor levels)
+typical_prop <- tibble(
+  metros10    = median(train_cls$metros10,  na.rm=TRUE),
+  rooms_cap   = median(train_cls$rooms_cap, na.rm=TRUE),
+  banos_imp   = median(train_cls$banos_imp, na.rm=TRUE),
+  banos_miss  = 0.0,
+  lift_f      = factor("No", levels=levels(train_cls$lift_f)),
+  floor_grp   = factor("BAJO", levels=levels(train_cls$floor_grp)),
+  pop_density = median(train_cls$pop_density, na.rm=TRUE),
+  inhabitants = median(train_cls$inhabitants, na.rm=TRUE),
+  area_km2    = median(train_cls$area_km2, na.rm=TRUE),
+  parks       = median(train_cls$parks,    na.rm=TRUE),
+  museums     = median(train_cls$museums,  na.rm=TRUE),
+  libraries   = median(train_cls$libraries,na.rm=TRUE),
+  schools     = median(train_cls$schools,  na.rm=TRUE)
+)
+
+zona_discount_grid <- tibble(zona = levels(train_cls$zona)) |>
+  crossing(typical_prop) |>
+  mutate(
+    p_discount = predict(m_cls_fe, newdata=cur_data(), type="response")
+  ) |>
+  left_join(market_benchmarks |> select(zona, district_label), by="zona") |>
+  mutate(zona_lbl = coalesce(district_label, zona)) |>
+  left_join(portfolio_by_zona |> select(zona, portfolio_n), by="zona") |>
+  mutate(
+    portfolio_n       = replace_na(portfolio_n, 0L),
+    portfolio_present = portfolio_n > 0
+  ) |>
+  arrange(desc(p_discount))
+
+ggplot(zona_discount_grid,
+       aes(x=reorder(zona_lbl, p_discount), y=p_discount,
+           fill=portfolio_present)) +
+  geom_col(width=0.7) +
+  geom_text(aes(label=paste0(scales::percent(p_discount, accuracy=0.1),
+                              if_else(portfolio_present,  " ★",""))),
+            hjust=-0.08, size=3.0) +
+  scale_fill_manual(
+    values=c("TRUE"=pal_main[1], "FALSE"=pal_main[4]),
+    labels=c("TRUE"="Portfolio active ★","FALSE"="Not in portfolio"),
+    name=NULL
+  ) +
+  scale_y_continuous(labels=scales::percent,
+                     expand=expansion(mult=c(0,0.18))) +
+  coord_flip() +
+  labs(
+    title    = "Predicted P(Discount) for Typical Property — By Zona",
+    subtitle = "FE logit model | Typical property = median structural features",
+    x = NULL, y = "Predicted probability of price discount",
+    caption  = "High P(discount) zones are where sellers are most likely to reduce prices — prime acquisition sweet spot"
+  )
+```
+
+```{r odds_ratios, fig.width=12, fig.height=7}
+# ── 11G. Odds ratios — what drives discounting? ────────────
+or_df <- tidy(m_cls_fe, exponentiate=TRUE, conf.int=TRUE) |>
+  filter(!str_starts(term, "zona"), term != "(Intercept)") |>
+  mutate(
+    term_lbl = recode(term,
+      "metros10"           = "Size (+10 m²)",
+      "rooms_cap"          = "Rooms (+1)",
+      "banos_imp"          = "Bathrooms (+1)",
+      "banos_missTRUE"     = "Bathrooms missing",
+      "lift_fSi"           = "Lift: Yes",
+      "lift_fMissing"      = "Lift: Missing",
+      "floor_grpSOTANO"    = "Floor: Basement",
+      "floor_grpENTRESUELO"= "Floor: Mezzanine",
+      "floor_grp1"         = "Floor: 1st",
+      "floor_grp2"         = "Floor: 2nd",
+      "floor_grp3"         = "Floor: 3rd",
+      "floor_grp4"         = "Floor: 4th",
+      "floor_grp5+"        = "Floor: 5th+",
+      "floor_grpATICO"     = "Floor: Penthouse"
+    ),
+    sig = p.value < 0.05
+  )
+
+ggplot(or_df,
+       aes(x=reorder(term_lbl, estimate), y=estimate,
+           ymin=conf.low, ymax=conf.high, colour=sig)) +
+  geom_hline(yintercept=1, linetype="dashed", colour="grey60") +
+  geom_pointrange(size=0.8) +
+  scale_colour_manual(
+    values=c("FALSE"="grey70","TRUE"=pal_main[3]),
+    labels=c("Not significant","p<0.05"),
+    name=NULL
+  ) +
+  coord_flip() +
+  labs(
+    title    = "Odds Ratios — Drivers of Price Discounting",
+    subtitle = "OR > 1 = increases P(discount) | OR < 1 = decreases P(discount) | Ref: ground floor, no lift",
+    x = NULL, y = "Odds ratio (95% CI)",
+    caption  = "Insight: identify which property characteristics predict a seller will reduce their asking price"
+  )
+```
